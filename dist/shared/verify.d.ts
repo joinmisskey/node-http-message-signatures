@@ -1,9 +1,8 @@
-import type { PublicKeySource } from '../types.js';
+import { ParsedAlgorithmIdentifier } from '../pem/spki.js';
+import type { VerificationOptions, PublicKeySource, ParsedSignature, SignInfo } from '../types.js';
 /**
  * Verify Request (Parsed)
  */
-import type { ParsedSignature, SignInfo } from '../types.js';
-import { ParsedAlgorithmIdentifier } from '../pem/spki.js';
 export declare class KeyHashValidationError extends Error {
     constructor(message: string);
 }
@@ -19,4 +18,5 @@ export declare function parseSignInfo(algorithm: string | undefined, real: Parse
  * This function is a wrapper for `verifyDraftSignature` and `verifyRFC9421Signature`.
  * `verifyRFC9421Signature` is fixed to verifyAll: false.
  */
-export declare function verifyParsedSignature(parsed: ParsedSignature, keys: PublicKeySource | Map<string, PublicKeySource>, errorLogger?: ((message: any) => any)): Promise<boolean>;
+export declare function verifyParsedSignature(parsed: ParsedSignature, options: VerificationOptions): Promise<boolean>;
+export declare function verifyParsedSignature(parsed: ParsedSignature, keys: PublicKeySource | Map<string, PublicKeySource>, errorLogger?: (message: any) => any): Promise<boolean>;

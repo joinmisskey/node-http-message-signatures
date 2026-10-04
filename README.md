@@ -155,3 +155,37 @@ For RSA PEM keys, select `{ hash: "SHA-512", ec: "DSA", rsa: "RSA-PSS" }` in the
 ### Public Multikey strings
 
 Public-key string inputs recognize bounded `z`/base58btc Multikey encodings: Ed25519 (`ed01` plus exactly 32 bytes) and RSA (`8524` plus a strict PKCS#1 public DER structure). `decodePublicMultikey` exposes the corresponding SPKI bytes. Secret, unknown or noncanonical codecs, invalid lengths and malformed RSA are rejected without PEM fallback. Inputs are limited to 8192 characters and RSA DER to 4096 bytes. Other encodings and compressed EC codecs are outside this initial scope. These formats cover Ed25519 and legacy RSA federation keys; see [FEP-521a](https://codeberg.org/fediverse/fep/src/branch/main/fep/521a/fep-521a.md) and the [multicodec registry](https://github.com/multiformats/multicodec/blob/master/table.csv).
+
+### Signature backends and asynchronous key resolution
+
+Existing calls use WebCrypto by default. A custom signing key specifies `keyId`, a version-appropriate `signatureAlgorithm`, a fully specified `algorithm` operation, and a `signer` returning `Promise<Uint8Array>`. Its optional `privateKey` must match the operation; omitting it avoids PEM/WebCrypto import entirely. RFC sources can set `signer` individually; a call-level default signer is also available. Source signers take precedence over the call default. The callback receives version, label (RFC only), key ID, separate wire algorithm and validated operation, signing string, and optional CryptoKey. Operations exclude ECDH and invented Ed25519 prehashes; PSS requires SHA-512/salt 64.
+
+```ts
+await signAsRFC9421ToRequestOrResponse(request, {
+  external: {
+    key: {
+      keyId: 'https://example.com/actor#key',
+      signatureAlgorithm: 'rsa-v1_5-sha256',
+      algorithm: { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+      signer: async ({ signingString }) => externalRsaSigner(signingString),
+    },
+    identifiers: ['@method', '@target-uri', 'date'],
+  },
+  native: { key: { keyId: edKeyId, privateKey: edPrivateKey }, identifiers: ['@method', '@target-uri', 'date'] },
+});
+```
+
+The additive verification overload accepts `{ keys?, resolveKey?, verifier?, logger? }`. A resolver receives `{ version, label?, keyId?, algorithm? }`, where `algorithm` is the optional wire identifier, and returns a key, candidate array, or `undefined`. The caller owns networking, cache, identity authorization and key lifetime. A supplied resolver is authoritative: `undefined` fails that signature and never falls back to `keys`. Malformed candidate imports can be skipped. A verifier receives the validated operation, wire identifier, signing string, signature bytes and optional public CryptoKey. Its `false` ends that signature without another backend/key attempt; other signatures may satisfy `verifyAll: false`. Callback exceptions propagate. `webCryptoSigner` and `webCryptoVerifier` are exported for mixed backend routing.
+
+```ts
+const parsed = parseRequestSignature(request, {
+  requiredComponents: { rfc9421: ['@method', '@target-uri', 'date'] },
+});
+if (!await verifyDigestHeader(request, rawBody)) throw new Error('Invalid body digest');
+const valid = await verifyParsedSignature(parsed, {
+  resolveKey: async ({ keyId, label, algorithm }) => localKeyStore.resolve(keyId, label, algorithm),
+  verifier: webCryptoVerifier,
+});
+```
+
+`verifyParsedSignature` verifies the supplied parsed cryptographic base. Time and required-component checks remain in parsing; body digest validation remains a separate call. Hooks do not add or bypass those checks. Keyless verification requires a declared wire algorithm with unambiguous operation parameters (RFC supported algorithms, draft RSA/Ed25519/Ed448); draft ECDSA needs a resolved key for its curve. Algorithm allowlists and all-versus-any behavior remain in RFC verification.

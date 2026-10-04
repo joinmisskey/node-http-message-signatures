@@ -49,7 +49,8 @@
     "build": "NODE_ENV=production node build.js && tsc --project tsconfig.build.json",
     "test:browser": "node test/browser/run.mjs",
     "performance": "node ./test/performance/draft.js",
-    "import-key-ram": "node --expose-gc ./test/performance/import-key-ram.js"
+    "import-key-ram": "node --expose-gc ./test/performance/import-key-ram.js",
+    "test:types": "tsc --noEmit --strict --skipLibCheck --target es2020 --module esnext --moduleResolution node --lib esnext,dom,dom.iterable test/types/hooks.ts"
   },
   "packageManager": "pnpm@8.15.4",
   "files": [

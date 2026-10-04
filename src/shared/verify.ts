@@ -1,14 +1,12 @@
-import type { PublicKeySource } from '../types.js';
+import { verifyDraftSignature } from 'src/draft/verify.js';
+import { verifyRFC9421Signature } from 'src/rfc9421/verify.js';
+import { ParsedAlgorithmIdentifier, getNistCurveFromOid, getPublicKeyAlgorithmNameFromOid } from '../pem/spki.js';
+import { keyHashAlgosForDraftDecoding } from '../draft/const.js';
+import { isVerificationOptions } from './backend.js';
+import type { VerificationOptions, PublicKeySource, ECNamedCurve, ParsedSignature, SignInfo, SignatureHashAlgorithmUpperSnake } from '../types.js';
 /**
  * Verify Request (Parsed)
  */
-
-import type { ECNamedCurve, ParsedSignature, SignInfo } from '../types.js';
-import { ParsedAlgorithmIdentifier, getNistCurveFromOid, getPublicKeyAlgorithmNameFromOid } from '../pem/spki.js';
-import type { SignatureHashAlgorithmUpperSnake } from '../types.js';
-import { keyHashAlgosForDraftDecoding } from '../draft/const.js';
-import { verifyDraftSignature } from 'src/draft/verify.js';
-import { verifyRFC9421Signature } from 'src/rfc9421/verify.js';
 
 export class KeyHashValidationError extends Error {
 	constructor(message: string) { super(message); }
@@ -135,19 +133,23 @@ export function parseSignInfo(algorithm: string | undefined, real: ParsedAlgorit
  * This function is a wrapper for `verifyDraftSignature` and `verifyRFC9421Signature`.
  * `verifyRFC9421Signature` is fixed to verifyAll: false.
  */
-export function verifyParsedSignature(
-	parsed: ParsedSignature,
-	keys: PublicKeySource | Map<string, PublicKeySource>,
-	errorLogger?: ((message: any) => any)
-): Promise<boolean> {
-	if (parsed.version === 'draft') {
-		if (keys instanceof Map) {
-			keys = keys.get(parsed.value.keyId)!;
-			if (!keys) throw new Error(`key not found: ${parsed.value.keyId}`);
+export function verifyParsedSignature(parsed: ParsedSignature, options: VerificationOptions): Promise<boolean>;
+export function verifyParsedSignature(parsed: ParsedSignature, keys: PublicKeySource | Map<string, PublicKeySource>, errorLogger?: (message: any) => any): Promise<boolean>;
+export function verifyParsedSignature(parsed: ParsedSignature, keysOrOptions: PublicKeySource | Map<string, PublicKeySource> | VerificationOptions, errorLogger?: (message: any) => any): Promise<boolean> {
+	if (isVerificationOptions(keysOrOptions)) {
+		if (parsed.version === 'draft') return verifyDraftSignature(parsed.value, keysOrOptions);
+		if (parsed.version === 'rfc9421') return verifyRFC9421Signature(parsed.value, { ...keysOrOptions, verifyAll: false });
+	} else {
+		if (parsed.version === 'draft') {
+			let key = keysOrOptions;
+			if (key instanceof Map) {
+				const selected = key.get(parsed.value.keyId);
+				if (!selected) throw new Error(`key not found: ${parsed.value.keyId}`);
+				key = selected;
+			}
+			return verifyDraftSignature(parsed.value, key, errorLogger);
 		}
-		return verifyDraftSignature(parsed.value, keys, errorLogger);
-	} else if (parsed.version === 'rfc9421') {
-		return verifyRFC9421Signature(parsed.value, keys, undefined, errorLogger);
+		if (parsed.version === 'rfc9421') return verifyRFC9421Signature(parsed.value, keysOrOptions, undefined, errorLogger);
 	}
-	throw new Error(`unsupported parsed signature`);
+	throw new Error('unsupported parsed signature');
 }

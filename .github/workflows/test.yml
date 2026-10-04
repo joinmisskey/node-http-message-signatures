@@ -29,6 +29,8 @@ jobs:
       - name: Build
         run: |
           pnpm build
+      - name: API types
+        run: pnpm run test:types
       - name: Test
         run: |
           pnpm test

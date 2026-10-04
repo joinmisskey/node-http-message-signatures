@@ -8,7 +8,7 @@ export const verificationCaseNames = [
   'fallback import is isolated per signature algorithm', 'algorithm allowlist is respected',
   'missing algorithm requires an identified key', 'custom SFV parsing and verification',
   'native Fetch Request signing and verification', 'pre-imported RSA keys enforce algorithm and hash',
-  'RSA-PSS SHA-512 uses exactly 64 salt bytes', 'native JWK metadata and Ed25519 signing', 'Ed25519 public Multikey verification',
+  'RSA-PSS SHA-512 uses exactly 64 salt bytes', 'native JWK metadata and Ed25519 signing', 'Ed25519 public Multikey verification', 'custom backends and authoritative resolver',
 ];
 
 function assert(value, message) {
@@ -173,6 +173,24 @@ export async function createVerificationCases(api, crypto) {
     const request = { method: 'GET', url: 'https://example.com/multikey?q=1', headers: { Host: 'example.com' } };
     await api.signAsRFC9421ToRequestOrResponse(request, { multi: { key: { keyId: 'multi', privateKey: pair.privateKey }, identifiers: ['@method', '@target-uri'] } });
     assert(await api.verifyParsedSignature(api.parseRequestSignature(request), 'z' + encoded), 'Multikey verification failed');
+  };
+  cases['custom backends and authoritative resolver'] = async () => {
+    const pair = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+    const request = { method: 'GET', url: 'https://example.com/hooks?q=1', headers: { Host: 'example.com' } };
+    let seen;
+    await api.signAsRFC9421ToRequestOrResponse(request, {
+      external: { key: { keyId: 'external', signatureAlgorithm: 'rsa-v1_5-sha256', algorithm: { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, signer: async context => { seen = context; return new Uint8Array(await crypto.subtle.sign({ name: 'RSASSA-PKCS1-v1_5' }, rsa.privateKey, new TextEncoder().encode(context.signingString))); } }, identifiers: ['@method'] },
+      native: { key: { keyId: 'native', privateKey: pair.privateKey }, signer: api.webCryptoSigner, identifiers: ['@method'] },
+    });
+    assert(seen.label === 'external' && seen.key === undefined, 'Keyless signer context mismatch');
+    const parsed = api.parseRequestSignature(request);
+    const resolveKey = async context => context.label === 'external' ? rsa.publicKey : pair.publicKey;
+    assert(await api.verifyRFC9421Signature(parsed.value, { resolveKey, verifier: api.webCryptoVerifier, verifyAll: true }), 'Mixed backends failed');
+    assert(!await api.verifyRFC9421Signature(parsed.value, { keys: new Map([['external', rsa.publicKey], ['native', pair.publicKey]]), resolveKey: async () => undefined, verifier: async () => true }), 'Resolver undefined must not fall back');
+    assert(!await api.verifyRFC9421Signature(parsed.value, { resolveKey, verifier: async () => false }), 'Verifier false must fail');
+    let threw = false;
+    try { await api.verifyRFC9421Signature(parsed.value, { resolveKey, verifier: async () => { throw new Error('backend error'); } }); } catch { threw = true; }
+    assert(threw, 'Verifier exception was swallowed');
   };
   return cases;
 }

@@ -1,10 +1,9 @@
-import type { IncomingRequest, PrivateKey, SignatureHashAlgorithmUpperSnake } from '../types.js';
-import { type SignInfoDefaults, defaultSignInfoDefaults } from '../utils.js';
-import { getJwkSigningDefaults } from '../pem/jwk.js';
-import { importPrivateKey } from '../pem/pkcs8.js';
+import { type SignInfoDefaults, encodeArrayBufferToBase64 } from '../utils.js';
+import { prepareSigningKey } from '../shared/backend.js';
+import { genSignature } from '../shared/sign.js';
 import { keyHashAlgosForDraftEncofing } from './const.js';
 import { genDraftSigningString } from './string.js';
-import { genSignature } from '../shared/sign.js';
+import type { CustomSigningKey, IncomingRequest, PrivateKey, SignatureHashAlgorithmUpperSnake, SignatureSigner } from '../types.js';
 
 /**
  * Get the algorithm string for draft encoding
@@ -14,7 +13,7 @@ import { genSignature } from '../shared/sign.js';
  */
 export function getDraftAlgoString(keyAlgorithm: string, hashAlgorithm: SignatureHashAlgorithmUpperSnake) {
 	const verifyHash = () => {
-		if (!hashAlgorithm) throw new Error(`hash is required or must not be null`);
+		if (!hashAlgorithm) throw new Error('hash is required or must not be null');
 		if (!(hashAlgorithm in keyHashAlgosForDraftEncofing)) throw new Error(`unsupported hash: ${hashAlgorithm}`);
 	};
 	if (keyAlgorithm === 'RSASSA-PKCS1-v1_5') {
@@ -33,12 +32,12 @@ export function getDraftAlgoString(keyAlgorithm: string, hashAlgorithm: Signatur
 		return `ecdh-${keyHashAlgosForDraftEncofing[hashAlgorithm!]}`;
 	}
 	if (keyAlgorithm === 'Ed25519') {
-		return `ed25519-sha512`; // Joyent/@peertube/http-signatureではこう指定する必要がある
+		return 'ed25519-sha512'; // Joyent/@peertube/http-signatureではこう指定する必要がある
 	}
 	if (keyAlgorithm === 'Ed448') {
-		return `ed448`;
+		return 'ed448';
 	}
-	throw new Error(`unsupported keyAlgorithm`);
+	throw new Error('unsupported keyAlgorithm');
 }
 
 /**
@@ -58,19 +57,16 @@ export function genDraftSignatureHeader(includeHeaders: string[], keyId: string,
  * @param opts
  * @returns result object
  */
-export async function signAsDraftToRequest(request: IncomingRequest, key: PrivateKey, includeHeaders: string[], opts?: SignInfoDefaults) {
-	opts = 'privateKeyJwk' in key ? getJwkSigningDefaults(key.privateKeyJwk, opts) : opts ?? defaultSignInfoDefaults;
-	// hashAlgorithm is old name
-	if ((opts as any).hashAlgorithm) {
-		opts.hash = (opts as any).hashAlgorithm;
-	}
-
-	const privateKey = 'privateKey' in key ? key.privateKey : await importPrivateKey(('privateKeyJwk' in key ? key.privateKeyJwk : key.privateKeyPem), ['sign'], opts);
-	const algoString = getDraftAlgoString(privateKey.algorithm.name, opts.hash);
+export async function signAsDraftToRequest(request: IncomingRequest, key: PrivateKey | CustomSigningKey, includeHeaders: string[], opts?: SignInfoDefaults & { signer?: SignatureSigner }) {
+	if (opts && (opts as any).hashAlgorithm) opts.hash = (opts as any).hashAlgorithm;
+	const prepared = await prepareSigningKey('draft', key, opts, opts?.signer);
+	const algoString = prepared.wire;
 
 	const signingString = genDraftSigningString(request, includeHeaders, { keyId: key.keyId, algorithm: algoString });
 
-	const signature = await genSignature(privateKey, signingString, opts);
+	const bytes = await prepared.signer({ version: 'draft', keyId: key.keyId, algorithm: prepared.operation, signatureAlgorithm: algoString, signingString, key: prepared.key });
+	if (!(bytes instanceof Uint8Array)) throw new Error('Signer must return Uint8Array');
+	const signature = encodeArrayBufferToBase64(new Uint8Array(bytes).buffer);
 	const signatureHeader = genDraftSignatureHeader(includeHeaders, key.keyId, signature, algoString);
 
 	Object.assign(request.headers, {

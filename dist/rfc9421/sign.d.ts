@@ -1,9 +1,10 @@
-import type { IncomingRequest, MapLikeObj, OutgoingResponse, PrivateKey, SFVSignatureParamsForInput, SignatureHashAlgorithmUpperSnake } from '../types.js';
+import * as sh from 'structured-headers';
 import { type SignInfoDefaults } from '../utils.js';
 import { SFVHeaderTypeDictionary } from './sfv.js';
-import * as sh from 'structured-headers';
+import type { IncomingRequest, MapLikeObj, OutgoingResponse, PrivateKey, CustomSigningKey, SignatureSigner, SFVSignatureParamsForInput, SignatureHashAlgorithmUpperSnake } from '../types.js';
 export type RFC9421SignSource = {
-    key: PrivateKey;
+    key: PrivateKey | CustomSigningKey;
+    signer?: SignatureSigner;
     defaults?: SignInfoDefaults;
     /**
      * @examples
@@ -45,8 +46,14 @@ export type RFC9421SignSource = {
  * @returns string e.g. 'rsa-v1_5-sha256'
  */
 export declare function getRFC9421AlgoString(keyAlgorithm: CryptoKey['algorithm'], hashAlgorithm: SignatureHashAlgorithmUpperSnake): "ed25519" | "rsa-pss-sha512" | "rsa-v1_5-sha256" | "ecdsa-p256-sha256" | "ecdsa-p384-sha384" | "rsa-v1_5-sha512";
-export declare function processSingleRFC9421SignSource(source: RFC9421SignSource): Promise<{
+export declare function processSingleRFC9421SignSource(source: RFC9421SignSource & {
+    key: PrivateKey;
+}): Promise<{
     key: CryptoKey;
+    params: SFVSignatureParamsForInput;
+}>;
+export declare function processSingleRFC9421SignSource(source: RFC9421SignSource): Promise<{
+    key: CryptoKey | undefined;
     params: SFVSignatureParamsForInput;
 }>;
 /**
@@ -61,6 +68,7 @@ export declare function signAsRFC9421ToRequestOrResponse(request: IncomingReques
     scheme?: string;
     additionalSfvTypeDictionary?: SFVHeaderTypeDictionary;
     request?: Request;
+    signer?: SignatureSigner;
 }): Promise<{
     inputHeader: string;
     signatureHeader: string;
