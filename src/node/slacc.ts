@@ -3,8 +3,7 @@ import { createPrivateKey, createPublicKey, type KeyObject } from 'node:crypto';
 import { decodePem } from '../pem/spki.js';
 import { genPkcs8FromPkcs1, genSpkiFromPkcs1, parsePkcs1PrivateKey } from '../pem/pkcs1.js';
 import { derSequence, readDer, unsignedDerInteger } from '../pem/der.js';
-import { importPrivateKey } from '../pem/pkcs8.js';
-import { webCryptoSigner, validateSignatureOperation } from '../shared/backend.js';
+import { validateSignatureOperation } from '../shared/backend.js';
 import type { CustomSigningKey, SignatureOperation, SignatureSignerContext, SignatureVerifier, SignatureVerifierContext } from '../types.js';
 
 export type SlaccKeyInput = string | Uint8Array | ArrayBuffer;
@@ -23,10 +22,6 @@ export interface SlaccBinding<Suite = string> {
 	SignatureAlgorithmIdentifier: { Rsa2048_8192: Suite; Eddsa: Suite };
 	Signer: { fromPkcs8Der(suite: Suite, der: Buffer): SlaccSignerHandle };
 	Verifier: { fromSpkiDer(suite: Suite, der: Buffer): SlaccVerifierHandle };
-}
-/** slacc 0.1.5 has RSA signing only, with a distinct API. */
-export interface LegacySlaccBinding {
-	RsaKeyPair: { fromPem(pem: string): { sign(payload: Buffer, callback: Callback<Buffer>): void } };
 }
 export type SlaccSigningOptions = { keyId: string; version: SlaccVersion; algorithm: SlaccAlgorithm; privateKey: SlaccKeyInput };
 export type SlaccVerifierOptions = { algorithm: SlaccAlgorithm; publicKey: SlaccKeyInput; version?: SlaccVersion };
@@ -165,44 +160,4 @@ export function createSlaccVerifier<Suite>(binding: SlaccBinding<Suite>, options
 		if (context.signature.length !== signatureLength) return false;
 		return invoke(callback => handle.verifyRaw(Buffer.from(context.signature), Buffer.from(context.signingString, 'utf8'), callback), result => typeof result === 'boolean');
 	};
-}
-/** Explicit compatibility with slacc 0.1.5; only RSA-v1.5/SHA-256 signing is supported. */
-export function createLegacySlaccRsaSigningKey(binding: LegacySlaccBinding, options: Omit<SlaccSigningOptions, 'algorithm'>): CustomSigningKey {
-	const { keyId, version, privateKey: input } = options;
-	const signatureAlgorithm = wire(version, 'rsa-v1_5-sha256');
-	const parsed = privateKey(input, 'rsa-v1_5-sha256');
-	const signatureLength = parsed.signatureLength;
-	const handle = binding.RsaKeyPair.fromPem(parsed.key.export({ type: 'pkcs8', format: 'pem' }).toString());
-	return { keyId, algorithm: operation('rsa-v1_5-sha256'), signatureAlgorithm, signer: async context => {
-		checkContext(context, 'rsa-v1_5-sha256', version);
-		if (context.keyId !== keyId) throw new Error('Signer key ID conflicts with slacc adapter');
-		return Uint8Array.from(await invoke(callback => handle.sign(Buffer.from(context.signingString, 'utf8'), callback), result => Buffer.isBuffer(result) && result.length === signatureLength));
-	} };
-}
-
-/** slacc 0.1.5 RSA signing plus WebCrypto Ed25519; construct once in the caller's cache. */
-export async function createLegacySlaccWebCryptoSigningKey(binding: LegacySlaccBinding, options: Omit<SlaccSigningOptions, 'algorithm'>): Promise<CustomSigningKey> {
-	const { keyId, version, privateKey: input } = options;
-	// Determine the declared DER key type, then apply the same strict validation as native adapters.
-	const fields = derSequence(bytes(input));
-	let selection: SlaccAlgorithm;
-	if (fields.length === 9 && fields.every(field => field.tag === 2)) selection = 'rsa-v1_5-sha256';
-	else {
-		if (fields.length !== 3) throw new Error('Expected unencrypted PKCS#8 or PKCS#1');
-		const identifier = derSequence(fields[1].encoded);
-		if (identifier[0]?.tag !== 6) throw new Error('Expected key algorithm OID');
-		const oid = Buffer.from(identifier[0].content).toString('hex');
-		if (oid === '2b6570') selection = 'ed25519';
-		else if (oid === '2a864886f70d010101') selection = 'rsa-v1_5-sha256';
-		else throw new Error('Legacy slacc/WebCrypto supports only RSA-v1.5/SHA-256 and Ed25519');
-	}
-	const signatureAlgorithm = wire(version, selection);
-	const parsed = privateKey(input, selection);
-	if (selection === 'rsa-v1_5-sha256') return createLegacySlaccRsaSigningKey(binding, { keyId, version, privateKey: parsed.der });
-	const key = await importPrivateKey(parsed.der);
-	return { keyId, algorithm: operation(selection), signatureAlgorithm, signer: async context => {
-		checkContext(context, selection, version);
-		if (context.keyId !== keyId) throw new Error('Signer key ID conflicts with slacc adapter');
-		return webCryptoSigner({ ...context, key });
-	} };
 }

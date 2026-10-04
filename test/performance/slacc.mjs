@@ -2,20 +2,18 @@
 import { createRequire } from 'node:module';
 import { generateKeyPairSync, createPrivateKey } from 'node:crypto';
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
-import { createSlaccSigningKey, createLegacySlaccRsaSigningKey } from '../../dist/node/slacc.mjs';
+import { createSlaccSigningKey } from '../../dist/node/slacc.mjs';
 import { importPrivateKey, webCryptoSigner } from '../../dist/index.mjs';
 import { rsa4096 } from '../keys.js';
-const mode = process.argv[2] ?? 'modern';
-if (!['modern', 'legacy'].includes(mode)) throw new Error('Use modern or legacy');
-const binding = createRequire(import.meta.url)(mode === 'modern' ? 'slacc-modern' : 'slacc-legacy');
-const threads = Number(process.argv[3] ?? 1);
+const binding = createRequire(import.meta.url)('slacc');
+const threads = Number(process.argv[2] ?? 1);
 if (![1, 4].includes(threads)) throw new Error('Use 1 or 4 slacc threads');
 binding.init(threads);
-const make = mode === 'modern' ? createSlaccSigningKey : createLegacySlaccRsaSigningKey;
+const make = createSlaccSigningKey;
 const keys = [
   ['RSA2048', 'rsa-v1_5-sha256', generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey],
   ['RSA4096', 'rsa-v1_5-sha256', createPrivateKey(rsa4096.privateKey)],
-  ...(mode === 'modern' ? [['Ed25519', 'ed25519', generateKeyPairSync('ed25519').privateKey]] : []),
+  ['Ed25519', 'ed25519', generateKeyPairSync('ed25519').privateKey],
 ];
 const rows = [];
 for (const [name, algorithm, key] of keys) {
@@ -54,4 +52,4 @@ for (const [name, algorithm, key] of keys) {
     }
   }
 }
-console.log(JSON.stringify({ mode, node: process.version, platform: process.platform, arch: process.arch, slaccThreads: threads, uvThreadpoolSize: process.env.UV_THREADPOOL_SIZE ?? 'default (4)', payload: 'UTF-8 signature base with 1024 extra ASCII bytes', rows }, null, 2));
+console.log(JSON.stringify({ slaccVersion: '0.2.0', node: process.version, platform: process.platform, arch: process.arch, slaccThreads: threads, uvThreadpoolSize: process.env.UV_THREADPOOL_SIZE ?? 'default (4)', payload: 'UTF-8 signature base with 1024 extra ASCII bytes', rows }, null, 2));

@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import { jest } from '@jest/globals';
-import { createSlaccSigningKey, createSlaccVerifier, createLegacySlaccRsaSigningKey, createLegacySlaccWebCryptoSigningKey, type SlaccBinding } from '../../src/node/slacc.js';
+import { createSlaccSigningKey, createSlaccVerifier, type SlaccBinding } from '../../src/node/slacc.js';
 import { importPrivateKey } from '../../src/index.js';
 
 const pair = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -14,8 +14,8 @@ function binding(signRaw = jest.fn((_payload: Buffer, callback: (e: Error | null
 	return { SignatureAlgorithmIdentifier: { Rsa2048_8192: 'Rsa2048_8192', Eddsa: 'Eddsa' }, Signer: { fromPkcs8Der: () => ({ publicKey: publicRaw, signRaw }) }, Verifier: { fromSpkiDer: () => ({ verifyRaw: (_s, _p, cb) => { cb(null, true); } }) } };
 }
 
-test.each(['modern', 'legacy'])('real slacc %s interoperability runs in a separate process', mode => {
-	const result = execFileSync(process.execPath, ['test/native/slacc-child.mjs', mode], { encoding: 'utf8', timeout: 30000 });
+test('real slacc 0.2.0 interoperability runs in a separate process', () => {
+	const result = execFileSync(process.execPath, ['test/native/slacc-child.mjs'], { encoding: 'utf8', timeout: 30000 });
 	expect(JSON.parse(result).checks).toBeGreaterThan(10);
 }, 35000);
 
@@ -59,14 +59,6 @@ test('caller option mutation cannot change a captured key or operation', async (
 	await expect(key.signer({ ...context, keyId: 'other' })).rejects.toThrow('key ID');
 });
 
-test('legacy adapter preserves raw bytes and rejects incompatible operations', async () => {
-	let payload: Buffer | undefined;
-	const key = createLegacySlaccRsaSigningKey({ RsaKeyPair: { fromPem: () => ({ sign: (bytes, cb) => { payload = bytes; cb(null, Buffer.alloc(256)); } }) } }, options);
-	await key.signer(context);
-	expect(payload).toEqual(Buffer.from(context.signingString, 'utf8'));
-	await expect(key.signer({ ...context, algorithm: { name: 'Ed25519' }, signatureAlgorithm: 'ed25519-sha512' })).rejects.toThrow('operation conflicts');
-});
-
 test('DER subarray boundaries and public constructor validation are retained', () => {
 	const native = binding();
 	const der = pair.privateKey.export({ format: 'der', type: 'pkcs8' });
@@ -98,22 +90,4 @@ test('keyless verifier rejects unknown versions and configured-operation substit
 	const verifier = createSlaccVerifier(binding(), { algorithm: options.algorithm, publicKey });
 	await expect(verifier({ ...context, version: 'unknown' as 'draft' })).rejects.toThrow('version');
 	await expect(verifier({ ...context, algorithm: { name: 'Ed25519' }, signatureAlgorithm: 'ed25519-sha512' })).rejects.toThrow('operation conflicts');
-});
-
-
-test('legacy hybrid rejects unsupported keys and never falls back after RSA native failure', async () => {
-	const failure = new Error('native construction failed');
-	const fromPem = jest.fn(() => { throw failure; });
-	const native = { RsaKeyPair: { fromPem } };
-	const ec = generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).privateKey.export({ type: 'pkcs8', format: 'der' });
-	await expect(createLegacySlaccWebCryptoSigningKey(native, { ...options, privateKey: ec })).rejects.toThrow('only RSA');
-	expect(fromPem).not.toHaveBeenCalled();
-	await expect(createLegacySlaccWebCryptoSigningKey(native, options)).rejects.toBe(failure);
-	expect(fromPem).toHaveBeenCalledTimes(1);
-	const ed = generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'der' });
-	const key = await createLegacySlaccWebCryptoSigningKey(native, { ...options, privateKey: ed });
-	expect(key.signatureAlgorithm).toBe('ed25519-sha512');
-	await expect(key.signer({ ...context, algorithm: key.algorithm, signatureAlgorithm: key.signatureAlgorithm })).resolves.toHaveLength(64);
-	await expect(key.signer({ ...context, algorithm: key.algorithm, signatureAlgorithm: key.signatureAlgorithm, version: 'rfc9421' })).rejects.toThrow('version');
-	expect(fromPem).toHaveBeenCalledTimes(1);
 });

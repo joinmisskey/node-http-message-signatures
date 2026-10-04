@@ -94,8 +94,7 @@
     "fastify-raw-body": "^4.3.0",
     "jest": "^29.7.0",
     "jest-mock": "^29.7.0",
-    "slacc-legacy": "npm:slacc@0.1.5",
-    "slacc-modern": "npm:slacc@0.2.0",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "slacc": "0.2.0"
   }
 }
