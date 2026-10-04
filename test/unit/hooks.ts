@@ -1,6 +1,6 @@
 import { generateKeyPairSync, sign, verify } from 'node:crypto';
 import { jest } from '@jest/globals';
-import { signAsDraftToRequest, signAsRFC9421ToRequestOrResponse, parseRequestSignature, verifyParsedSignature, verifyRFC9421Signature, getWebcrypto, webCryptoSigner, webCryptoVerifier, CustomSigningKey, SignatureSignerContext } from '../../src/index.js';
+import { genSignature, signAsDraftToRequest, signAsRFC9421ToRequestOrResponse, parseRequestSignature, verifyParsedSignature, verifyRFC9421Signature, getWebcrypto, webCryptoSigner, webCryptoVerifier, CustomSigningKey, SignatureSignerContext } from '../../src/index.js';
 const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const pem = rsa.publicKey.export({ type: 'spki', format: 'pem' }).toString();
 const request = () => ({ method: 'POST', url: 'https://example.com/inbox?x=1', headers: { Host: 'example.com', Date: new Date().toUTCString() } });
@@ -44,6 +44,7 @@ test('resolver is authoritative; undefined fails and exceptions propagate', asyn
 	expect(seen).toMatchObject({ version: 'rfc9421', label: 'rsa', keyId: 'rsa', algorithm: 'rsa-v1_5-sha256' });
 	await expect(verifyParsedSignature(parsed, { resolveKey: async () => { throw new Error('resolver backend failed'); } })).rejects.toThrow('resolver backend failed');
 	expect(await verifyParsedSignature(parsed, { resolveKey: async () => ['malformed', pem] })).toBe(true);
+	expect(await verifyParsedSignature(parsed, { keys: new Map([['rsa', undefined as unknown as string]]), verifier: async () => true })).toBe(false);
 });
 
 test('custom verifier false/error never falls back for the same signature', async () => {
@@ -111,4 +112,11 @@ test('draft unknown algorithm is rejected before resolver/backend callbacks', as
 test('signer backend exceptions propagate and invalid byte results fail', async () => {
 	await expect(signAsRFC9421ToRequestOrResponse(request(), { rsa: { key: { ...custom, signer: async () => { throw new Error('signing backend failed'); } }, identifiers: ['@method'] } })).rejects.toThrow('signing backend failed');
 	await expect(signAsDraftToRequest(request(), { ...custom, signatureAlgorithm: 'rsa-sha256', signer: async () => 'invalid' as unknown as Uint8Array }, ['host'])).rejects.toThrow('Uint8Array');
+});
+
+test('explicit RSA mode cannot override an already bound CryptoKey', async () => {
+	const privateKey = await (await getWebcrypto()).subtle.importKey('jwk', rsa.privateKey.export({ format: 'jwk' }), { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
+	const defaults = { hash: 'SHA-256', ec: 'DSA', rsa: 'RSA-PSS' } as const;
+	await expect(signAsDraftToRequest(request(), { keyId: 'rsa', privateKey }, ['host'], defaults)).rejects.toThrow('RSA mode');
+	await expect(genSignature(privateKey, 'bound RSA', defaults)).rejects.toThrow('RSA mode');
 });

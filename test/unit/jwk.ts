@@ -51,6 +51,7 @@ test.each([['RS384', 'SHA-384'], ['RS512', 'SHA-512']])('draft %s derives omitte
 	expect(result.signatureHeader).toContain(`algorithm="rsa-${hash.replace('-', '').toLowerCase()}"`);
 	expect(await verifyParsedSignature(parseRequestSignature(request), { ...publicJwk, alg })).toBe(true);
 	await expect(signAsDraftToRequest(request, key, ['host'], { hash: 'SHA-256', ec: 'DSA' })).rejects.toThrow('conflict');
+	await expect(signAsRFC9421ToRequestOrResponse(request, { jwk: { key, identifiers: ['@method'] } })).rejects.toThrow('unsupported');
 });
 
 test('ES384 draft/RFC and PS512 RFC derive omitted defaults and reject hash/mode overrides', async () => {

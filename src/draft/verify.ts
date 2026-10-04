@@ -20,6 +20,7 @@ export async function verifyDraftSignature(parsed: ParsedDraftSignature['value']
 	} else if (options.keys instanceof Map) candidates = options.keys.has(parsed.keyId) ? [options.keys.get(parsed.keyId)] : [];
 	else candidates = options.keys === undefined ? options.verifier && parsed.algorithm ? [undefined] : [] : [options.keys];
 	for (const candidate of candidates) {
+		if (candidate === undefined && (options.keys !== undefined || options.resolveKey)) continue;
 		let context;
 		try {
 			const key = candidate === undefined ? undefined : (await parseAndImportPublicKey(candidate, ['verify'], parsed.algorithm)).publicKey;

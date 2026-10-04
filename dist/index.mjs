@@ -900,6 +900,8 @@ var textEncoder = new TextEncoder();
 
 // src/shared/sign.ts
 async function genSignature(privateKey, signingString, defaults = defaultSignInfoDefaults) {
+  if (defaults.rsa && (privateKey.algorithm.name === "RSA-PSS" || privateKey.algorithm.name === "RSASSA-PKCS1-v1_5") && defaults.rsa !== privateKey.algorithm.name)
+    throw new Error("CryptoKey RSA mode conflicts with signing defaults");
   const signatureAB = await (await getWebcrypto()).subtle.sign(genAlgorithmForSignAndVerify(privateKey.algorithm, defaults.hash), privateKey, textEncoder.encode(signingString));
   return encodeArrayBufferToBase64(signatureAB);
 }
@@ -1184,12 +1186,18 @@ async function webCryptoVerifier(context) {
 async function prepareSigningKey(version, source, defaults, signer) {
   if ("signatureAlgorithm" in source) {
     const operation2 = validateSignatureOperation(version, source.signatureAlgorithm, source.algorithm);
+    if (defaults && "hash" in operation2 && defaults.hash !== operation2.hash)
+      throw new Error("Signing defaults conflict with explicit operation");
+    if (defaults?.rsa && defaults.rsa !== operation2.name)
+      throw new Error("Signing defaults conflict with explicit RSA mode");
     if (source.privateKey)
       validateOperationKey(source.privateKey, operation2, "sign");
     return { key: source.privateKey, operation: operation2, wire: source.signatureAlgorithm, signer: signer ?? source.signer };
   }
   const effective = "privateKeyJwk" in source ? getJwkSigningDefaults(source.privateKeyJwk, defaults) : defaults ?? defaultSignInfoDefaults;
   const key = "privateKey" in source ? source.privateKey : await importPrivateKey("privateKeyJwk" in source ? source.privateKeyJwk : source.privateKeyPem, ["sign"], effective);
+  if (effective.rsa && (key.algorithm.name === "RSA-PSS" || key.algorithm.name === "RSASSA-PKCS1-v1_5") && effective.rsa !== key.algorithm.name)
+    throw new Error("CryptoKey RSA mode conflicts with signing defaults");
   const wire = version === "draft" ? getDraftAlgoString(key.algorithm.name, effective.hash) : getRFC9421AlgoString(key.algorithm, effective.hash);
   const operation = validateSignatureOperation(version, wire, parseSignInfo(wire, key.algorithm));
   validateOperationKey(key, operation, "sign");
@@ -1217,6 +1225,8 @@ async function verifyDraftSignature(parsed, keyOrOptions, errorLogger) {
   else
     candidates = options.keys === void 0 ? options.verifier && parsed.algorithm ? [void 0] : [] : [options.keys];
   for (const candidate of candidates) {
+    if (candidate === void 0 && (options.keys !== void 0 || options.resolveKey))
+      continue;
     let context;
     try {
       const key = candidate === void 0 ? void 0 : (await parseAndImportPublicKey(candidate, ["verify"], parsed.algorithm)).publicKey;
@@ -1287,6 +1297,8 @@ async function verifyRFC9421Signature(parsedEntries, keysOrOptions, options, err
       candidates = keys === void 0 ? settings.verifier && wire ? [void 0] : [] : [keys];
     let verified = false;
     for (const candidate of candidates) {
+      if (candidate === void 0 && (keys !== void 0 || settings.resolveKey))
+        continue;
       let key;
       let operation;
       let signature;
@@ -2996,7 +3008,6 @@ export {
   genSpkiFromPkcs1,
   getDraftAlgoString,
   getHeaderValue,
-  getJwkSigningDefaults,
   getMap,
   getMapWithoutUndefined,
   getNistCurveFromOid,
@@ -3008,18 +3019,15 @@ export {
   importPrivateKey,
   importPublicJwk,
   importPublicKey,
-  importSignatureJwk,
   isBrowserHeader,
   isBrowserRequest,
   isBrowserResponse,
-  isVerificationOptions,
   keyHashAlgosForDraftDecoding,
   keyHashAlgosForDraftEncofing,
   knownSfvHeaderTypeDictionary,
   lcObjectKey,
   numberToUint8Array,
   obsoleteLineFoldingRegEx,
-  operationWithoutKey,
   parseAlgorithmIdentifier,
   parseAndImportPublicKey,
   parseDraftRequest,
@@ -3033,7 +3041,6 @@ export {
   parseSignInfo,
   parseSingleRFC9421Signature,
   parseSpki,
-  prepareSigningKey,
   processSingleRFC9421SignSource,
   removeObsoleteLineFolding,
   requestTargetDerivedComponents,
@@ -3047,11 +3054,8 @@ export {
   supportedHashAlgorithmsWithRFC9530AndWebCrypto,
   toStringOrToLc,
   validateAndProcessParsedDraftSignatureHeader,
-  validateOperationKey,
   validateRFC9421SignatureInputParameters,
   validateRequestAndGetSignatureHeader,
-  validateSignatureAlgorithm,
-  validateSignatureOperation,
   verifyDigestHeader,
   verifyDraftSignature,
   verifyParsedSignature,

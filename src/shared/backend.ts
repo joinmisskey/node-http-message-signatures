@@ -57,11 +57,14 @@ export async function webCryptoVerifier(context: SignatureVerifierContext): Prom
 export async function prepareSigningKey(version: 'draft' | 'rfc9421', source: PrivateKey | CustomSigningKey, defaults?: SignInfoDefaults, signer?: SignatureSigner) {
 	if ('signatureAlgorithm' in source) {
 		const operation = validateSignatureOperation(version, source.signatureAlgorithm, source.algorithm);
+		if (defaults && 'hash' in operation && defaults.hash !== operation.hash) throw new Error('Signing defaults conflict with explicit operation');
+		if (defaults?.rsa && defaults.rsa !== operation.name) throw new Error('Signing defaults conflict with explicit RSA mode');
 		if (source.privateKey) validateOperationKey(source.privateKey, operation, 'sign');
 		return { key: source.privateKey, operation, wire: source.signatureAlgorithm, signer: signer ?? source.signer };
 	}
 	const effective = 'privateKeyJwk' in source ? getJwkSigningDefaults(source.privateKeyJwk, defaults) : defaults ?? defaultSignInfoDefaults;
 	const key = 'privateKey' in source ? source.privateKey : await importPrivateKey('privateKeyJwk' in source ? source.privateKeyJwk : source.privateKeyPem, ['sign'], effective);
+	if (effective.rsa && (key.algorithm.name === 'RSA-PSS' || key.algorithm.name === 'RSASSA-PKCS1-v1_5') && effective.rsa !== key.algorithm.name) throw new Error('CryptoKey RSA mode conflicts with signing defaults');
 	const wire = version === 'draft' ? getDraftAlgoString(key.algorithm.name, effective.hash) : getRFC9421AlgoString(key.algorithm, effective.hash);
 	const operation = validateSignatureOperation(version, wire, parseSignInfo(wire, key.algorithm) as SignatureOperation);
 	validateOperationKey(key, operation, 'sign');

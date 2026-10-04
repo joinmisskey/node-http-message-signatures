@@ -41,6 +41,7 @@ export async function verifyRFC9421Signature(
 		} else candidates = keys === undefined ? settings.verifier && wire ? [undefined] : [] : [keys];
 		let verified = false;
 		for (const candidate of candidates) {
+			if (candidate === undefined && (keys !== undefined || settings.resolveKey)) continue;
 			let key: CryptoKey | undefined;
 			let operation: SignatureOperation;
 			let signature: Uint8Array;
