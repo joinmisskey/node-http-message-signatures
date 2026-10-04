@@ -34,6 +34,8 @@ jobs:
       - name: Test
         run: |
           pnpm test
+      - name: Packed artifact
+        run: pnpm run test:package
       - name: Performance
         run: |
           pnpm performance

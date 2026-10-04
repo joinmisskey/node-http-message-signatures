@@ -60,7 +60,9 @@
     "performance": "node ./test/performance/draft.js",
     "import-key-ram": "node --expose-gc ./test/performance/import-key-ram.js",
     "test:types": "tsc --noEmit --strict --skipLibCheck --target es2020 --module esnext --moduleResolution node --lib esnext,dom,dom.iterable test/types/hooks.ts && tsc --noEmit --strict --skipLibCheck --target es2020 --module nodenext --moduleResolution nodenext --lib esnext,dom,dom.iterable test/types/slacc.ts && node test/native/slacc-exports.mjs",
-    "performance:slacc": "node test/performance/slacc.mjs"
+    "performance:slacc": "node test/performance/slacc.mjs",
+    "prepack": "npm run build",
+    "test:package": "node scripts/test-package.mjs"
   },
   "packageManager": "pnpm@8.15.4",
   "files": [

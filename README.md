@@ -224,3 +224,8 @@ For modern slacc, import `createSlaccSigningKey`/`createSlaccVerifier`, pass the
 Native tests execute 0.1.5 and 0.2.0 in separate processes. Run the opt-in bounded benchmark with `pnpm performance:slacc modern` or `pnpm performance:slacc legacy`: it compares cold construction and warm reused handles with WebCrypto for RSA 2048/4096 and modern Ed25519 at concurrency 1/16, using one slacc thread by default. For a matched four-thread comparison, run `UV_THREADPOOL_SIZE=4 pnpm performance:slacc modern 4` (or `legacy 4`) in a fresh process. Results depend on workload and machine; no general speedup is promised. Browser and edge applications should import the main entry point, not the Node adapter.
 
 Populate the caller-owned key cache with the factory result, then pass it directly to `signAsDraftToRequest`. Bind cache identity to key material, key ID and signature version, and invalidate on rotation/refresh. Construction, PEM parsing and WebCrypto import happen on cache misses, not on each signature. Queue payloads remain PEM; reconstruct/cache the signing key in the worker. The adapter owns no global cache or thread pool.
+
+
+## Building from source
+
+Generated `dist/` is not tracked in Git. Run `pnpm install --frozen-lockfile` and `pnpm build` before built-file tests or local use. Normal `npm pack`/`pnpm pack` regenerates the ESM/CommonJS files and type declarations through `prepack`; published packages include them. There is no install-time `prepare` hook. Use the npm package or a locally built tarball instead of treating a Git checkout as a prebuilt dependency. See [RELEASING.md](./RELEASING.md) for clean-checkout validation and staged publishing.

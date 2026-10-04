@@ -22,8 +22,23 @@ node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand test/un
 pnpm run test:types
 pnpm run test:browser
 pnpm performance
-pnpm pack --pack-destination /tmp
+pnpm run test:package
+npm pack --pack-destination /tmp
 ```
+
+Generated `dist/` is ignored and is not committed to Git. A fresh checkout has
+source only: install the pinned development dependencies, then run `pnpm build`
+before type checks or tests that import built files. Normal `npm pack` (and
+`pnpm pack`) runs `prepack`, which invokes the existing build and regenerates
+ESM, CommonJS and declarations. There is no install-time `prepare` hook. Direct
+Git dependency installs are not a supported prebuilt distribution; use the npm
+package or a reviewed, locally built tarball. Pack/build do not initialize any
+native crypto thread pool.
+
+The staging workflow keeps its explicit validated build and `npm pack
+--ignore-scripts`; do not bypass that build. `pnpm run test:package` exercises
+normal pack from source and imports the actual tarball through package exports
+in ESM/CommonJS, including a Node subpath when declared.
 
 Inspect the tarball: `dist/index.mjs`, `dist/index.cjs`, type declarations,
 `package.json`, README, and the unchanged LICENSE must be present. Confirm the
@@ -53,7 +68,7 @@ As of 2026-10-04, npm `latest` is `0.0.11`, which is publicly published.
 The user selected the unused stable version `1.0.0` and channel `latest` for the
 reviewed main changes from PRs #2–#7, based on commit
 `4bfeb5dfb8df62bf66c80a14eb3ff9e103560e18`. The release commit updates the
-package version and build artifacts; the tag `v1.0.0` must point to that commit.
+package version; build artifacts are generated during validation and packing; the tag `v1.0.0` must point to that commit.
 Read registry and staged-package state before any future release; do not reuse
 an old tarball or assume that a GitHub tag determines the npm package version.
 
