@@ -35,9 +35,8 @@ export function parseSignInfo(algorithm: string | undefined, real: ParsedAlgorit
 			: real.name;
 
 	if (realKeyType === 'RSA-PSS') {
-		// 公開鍵にこれが使われることはないが、一応
-		if (algorithm === 'rsa-pss-sha512') {
-			return { name: 'RSA-PSS', hash: 'SHA-512' };
+		if (!algorithm || algorithm === 'rsa-pss-sha512') {
+			return { name: 'RSA-PSS', hash: 'SHA-512', saltLength: 64 };
 		}
 	}
 
@@ -51,7 +50,7 @@ export function parseSignInfo(algorithm: string | undefined, real: ParsedAlgorit
 			return { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' };
 		}
 		if (algorithm === 'rsa-pss-sha512') { // RFC9421
-			return { name: 'RSA-PSS', hash: 'SHA-512' };
+			return { name: 'RSA-PSS', hash: 'SHA-512', saltLength: 64 };
 		}
 
 		//#region Draft

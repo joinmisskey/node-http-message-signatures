@@ -1,3 +1,4 @@
+import { normalizePssContainer } from './pss.js';
 import { ASN1 } from '@lapo/asn1js';
 import { Hex } from '@lapo/asn1js/hex.js';
 import { Base64 } from '@lapo/asn1js/base64.js';
@@ -20,7 +21,7 @@ export class SpkiParseError extends Error {
 export function getPublicKeyAlgorithmNameFromOid(oidStr: string): KeyAlgorithmName {
 	const oid = oidStr.split('\n')[0].trim();
 	if (oid === '1.2.840.113549.1.1.1') return 'RSASSA-PKCS1-v1_5';
-	if (oid === '1.2.840.113549.1.1.7') return 'RSA-PSS';
+	if (oid === '1.2.840.113549.1.1.10') return 'RSA-PSS';
 	if (oid === '1.2.840.10040.4.1') return 'DSA';
 	if (oid === '1.2.840.10046.2.1') return 'DH';
 	if (oid === '2.16.840.1.101.2.1.1.22') return 'KEA';
@@ -62,7 +63,7 @@ export function asn1ToArrayBuffer(asn1: ASN1, contentOnly = false) {
 		// enc is binary string
 		return Uint8Array.from(fullEnc.slice(start, end), s => s.charCodeAt(0)).buffer;
 	} else if (fullEnc instanceof Uint8Array) {
-		return fullEnc.buffer.slice(start, end);
+		return new Uint8Array(fullEnc.subarray(start, end)).buffer;
 	} if (fullEnc instanceof ArrayBuffer) {
 		return new Uint8Array(fullEnc.slice(start, end)).buffer;
 	} else if (Array.isArray(fullEnc)) {
@@ -157,9 +158,12 @@ export function parseSpki(input: ASN1.StreamOrBinary): SpkiParsedAlgorithmIdenti
 	const parsed = ASN1.decode(decodePem(input));
 	if (!parsed.sub || parsed.sub.length === 0 || parsed.sub.length > 2) throw new SpkiParseError('Invalid SPKI (invalid sub)');
 
+	const identifier = parseAlgorithmIdentifier(parsed.sub[0]);
+	const der = asn1ToArrayBuffer(parsed);
+	if (identifier.algorithm.split('\n')[0] === '1.2.840.113549.1.1.10' && parsed.posEnd() !== parsed.stream.enc.length) throw new SpkiParseError('Trailing PSS key data');
 	return {
-		der: asn1ToArrayBuffer(parsed),
-		...parseAlgorithmIdentifier(parsed.sub[0]),
+		der: identifier.algorithm.split('\n')[0] === '1.2.840.113549.1.1.10' ? normalizePssContainer(new Uint8Array(der), 0) : der,
+		...identifier,
 	};
 }
 

@@ -143,3 +143,7 @@ indentation comes from Pichu Chen (PichuChen)'s
 ### PKCS#1 private keys
 
 `importPrivateKey` accepts unencrypted two-prime RSA PKCS#1 PEM/DER as well as PKCS#8. `parsePkcs1PrivateKey` validates the version-0 DER structure, and `genPkcs8FromPkcs1` returns a PKCS#8 wrapper. Encrypted keys, multiprime RSA, trailing bytes, negative/zero key integers, and nonminimal DER encodings are rejected. The default RSA signing algorithm remains RSASSA-PKCS1-v1_5 with SHA-256.
+
+### RFC 9421 RSA-PSS
+
+For RSA PEM keys, select `{ hash: "SHA-512", ec: "DSA", rsa: "RSA-PSS" }` in the signing source `defaults`. Existing RSA defaults are unchanged. Native RSA-PSS CryptoKeys must already bind SHA-512. Signing and verification use exactly 64 salt bytes and WebCrypto MGF1/SHA-512, as required by [RFC 9421 section 3.3.1](https://www.rfc-editor.org/rfc/rfc9421.html#section-3.3.1). Restricted PSS SPKI/PKCS#8 parameters are checked before normalization: SHA-512, MGF1/SHA-512, trailer 1, and a minimum salt length no greater than 64. Absent parameters impose no restrictions; omitted hash/MGF fields in present parameters default to SHA-1 and are rejected. RSA-OAEP keys are not signature keys.

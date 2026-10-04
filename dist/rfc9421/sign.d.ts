@@ -44,7 +44,7 @@ export type RFC9421SignSource = {
  * @param hashAlgorithm e.g. 'SHA-256'
  * @returns string e.g. 'rsa-v1_5-sha256'
  */
-export declare function getRFC9421AlgoString(keyAlgorithm: CryptoKey['algorithm'], hashAlgorithm: SignatureHashAlgorithmUpperSnake): "ed25519" | "rsa-v1_5-sha256" | "ecdsa-p256-sha256" | "ecdsa-p384-sha384" | "rsa-v1_5-sha512";
+export declare function getRFC9421AlgoString(keyAlgorithm: CryptoKey['algorithm'], hashAlgorithm: SignatureHashAlgorithmUpperSnake): "ed25519" | "rsa-pss-sha512" | "rsa-v1_5-sha256" | "ecdsa-p256-sha256" | "ecdsa-p384-sha384" | "rsa-v1_5-sha512";
 export declare function processSingleRFC9421SignSource(source: RFC9421SignSource): Promise<{
     key: CryptoKey;
     params: SFVSignatureParamsForInput;

@@ -54,6 +54,10 @@ export function getRFC9421AlgoString(keyAlgorithm: CryptoKey['algorithm'], hashA
 		keyAlgorithm = { name: keyAlgorithm };
 	}
 
+	if (keyAlgorithm.name === 'RSA-PSS') {
+		if (hashAlgorithm !== 'SHA-512' || (keyAlgorithm as RsaHashedKeyAlgorithm).hash?.name !== 'SHA-512') throw new Error('RFC 9421 RSA-PSS requires SHA-512');
+		return 'rsa-pss-sha512';
+	}
 	if (keyAlgorithm.name === 'RSASSA-PKCS1-v1_5') {
 		if (hashAlgorithm === 'SHA-256') return 'rsa-v1_5-sha256';
 		if (hashAlgorithm === 'SHA-512') return 'rsa-v1_5-sha512';

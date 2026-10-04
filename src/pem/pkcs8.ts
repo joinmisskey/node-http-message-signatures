@@ -1,3 +1,4 @@
+import { normalizePssContainer } from './pss.js';
 import { genPkcs8FromPkcs1 } from './pkcs1.js';
 import { ASN1 } from '@lapo/asn1js';
 import { ParsedAlgorithmIdentifierBase, asn1ToArrayBuffer, decodePem, parseAlgorithmIdentifier } from './spki.js';
@@ -37,6 +38,7 @@ export function parsePkcs8(input: ASN1.StreamOrBinary): ParsedPkcs8 {
 	const version = parsed.sub[0];
 	if (!version || !version.tag || version.tag.tagNumber !== 0x02) throw new Pkcs8ParseError('Invalid PKCS#8 (invalid version)');
 	const privateKeyAlgorithm = parseAlgorithmIdentifier(parsed.sub[1]);
+	if (privateKeyAlgorithm.algorithm.split('\n')[0] === '1.2.840.113549.1.1.10' && parsed.posEnd() !== parsed.stream.enc.length) throw new Pkcs8ParseError('Trailing PSS key data');
 	const privateKey = parsed.sub[2];
 	if (!privateKey || !privateKey.tag || privateKey.tag.tagNumber !== 0x04) throw new Pkcs8ParseError('Invalid PKCS#8 (invalid privateKey)');
 	const attributes = parsed.sub[3];
@@ -45,7 +47,8 @@ export function parsePkcs8(input: ASN1.StreamOrBinary): ParsedPkcs8 {
 	}
 
 	return {
-		der: asn1ToArrayBuffer(parsed),
+		der: privateKeyAlgorithm.algorithm.split('\n')[0] === '1.2.840.113549.1.1.10'
+			? normalizePssContainer(new Uint8Array(asn1ToArrayBuffer(parsed)), 1) : asn1ToArrayBuffer(parsed),
 		...privateKeyAlgorithm,
 		attributesRaw: attributes ? asn1ToArrayBuffer(attributes) : null,
 	};

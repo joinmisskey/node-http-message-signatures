@@ -8,6 +8,7 @@ export const verificationCaseNames = [
   'fallback import is isolated per signature algorithm', 'algorithm allowlist is respected',
   'missing algorithm requires an identified key', 'custom SFV parsing and verification',
   'native Fetch Request signing and verification', 'pre-imported RSA keys enforce algorithm and hash',
+  'RSA-PSS SHA-512 uses exactly 64 salt bytes',
 ];
 
 function assert(value, message) {
@@ -133,5 +134,21 @@ export async function createVerificationCases(api, crypto) {
   }
   cases['custom SFV parsing and verification'] = () => sfv(false);
   cases['native Fetch Request signing and verification'] = () => sfv(true);
+  cases['RSA-PSS SHA-512 uses exactly 64 salt bytes'] = async () => {
+    const pair = await crypto.subtle.generateKey({ name: 'RSA-PSS', hash: 'SHA-512', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]) }, true, ['sign', 'verify']);
+    const request = { method: 'GET', url: 'https://example.com/pss?query=1', headers: { Host: 'example.com' } };
+    const defaults = { hash: 'SHA-512', ec: 'DSA', rsa: 'RSA-PSS' };
+    await api.signAsRFC9421ToRequestOrResponse(request, { pss: { key: { keyId: 'pss', privateKey: pair.privateKey }, defaults, identifiers: ['@method', '@target-uri'] } });
+    const parsed = api.parseRequestSignature(request);
+    assert(await api.verifyParsedSignature(parsed, pair.publicKey), 'PSS CryptoKey failed');
+    const exported = new Uint8Array(await crypto.subtle.exportKey('spki', pair.publicKey));
+    const pem = `-----BEGIN PUBLIC KEY-----\n${btoa(String.fromCharCode(...exported))}\n-----END PUBLIC KEY-----`;
+    assert(await api.verifyParsedSignature(parsed, pem), 'PSS PEM failed');
+    for (const saltLength of [0, 32, 65]) {
+      const signature = new Uint8Array(await crypto.subtle.sign({ name: 'RSA-PSS', saltLength }, pair.privateKey, new TextEncoder().encode(parsed.value[0][1].base)));
+      const bad = [['pss', { ...parsed.value[0][1], signature: btoa(String.fromCharCode(...signature)) }]];
+      assert(!await api.verifyRFC9421Signature(bad, pair.publicKey), 'Wrong PSS salt accepted');
+    }
+  };
   return cases;
 }

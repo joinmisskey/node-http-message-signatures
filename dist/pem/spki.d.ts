@@ -112,6 +112,11 @@ export declare function parseAndImportPublicKey(source: ASN1.StreamOrBinary | Cr
     publicKey: any;
     algorithm: {
         name: string;
+        hash: string;
+        saltLength: number;
+    } | {
+        name: string;
         hash: import("../types.js").SignatureHashAlgorithmUpperSnake;
+        saltLength?: undefined;
     };
 }>;

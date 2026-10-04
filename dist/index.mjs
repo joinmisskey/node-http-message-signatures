@@ -595,14 +595,6 @@ var require_dist = __commonJS({
   }
 });
 
-// src/pem/spki.ts
-import { ASN1 as ASN12 } from "@lapo/asn1js";
-import { Hex } from "@lapo/asn1js/hex.js";
-import { Base64 } from "@lapo/asn1js/base64.js";
-
-// src/pem/pkcs1.ts
-import { ASN1 } from "@lapo/asn1js";
-
 // src/pem/der.ts
 function readDer(data, offset = 0) {
   const start = offset;
@@ -656,6 +648,7 @@ function unsignedDerInteger(element, allowZero = false) {
 }
 
 // src/pem/pkcs1.ts
+import { ASN1 } from "@lapo/asn1js";
 var Pkcs1ParseError = class extends Error {
   constructor(message) {
     super(message);
@@ -746,6 +739,74 @@ function genPkcs8FromPkcs1(input) {
   ]);
   return Uint8Array.from([48, ...genASN1Length(content.length), ...content]);
 }
+
+// src/pem/pss.ts
+var sha512Oid = [96, 134, 72, 1, 101, 3, 4, 2, 3];
+var mgf1Oid = [42, 134, 72, 134, 247, 13, 1, 1, 8];
+function matchesOid(element, expected) {
+  return element.tag === 6 && element.content.length === expected.length && element.content.every((byte, i) => byte === expected[i]);
+}
+function hash512(element) {
+  if (element.tag !== 48)
+    throw new Error("Invalid PSS hash identifier");
+  const parts = derChildren(element.content);
+  if (parts.length < 1 || parts.length > 2 || !matchesOid(parts[0], sha512Oid) || parts[1] && (parts[1].tag !== 5 || parts[1].content.length)) {
+    throw new Error("RSA-PSS requires SHA-512");
+  }
+}
+function validateRfc9421PssParameters(identifier) {
+  const parts = derSequence(identifier.encoded);
+  if (parts.length === 1)
+    return;
+  if (parts.length !== 2 || parts[1].tag !== 48)
+    throw new Error("Invalid RSA-PSS parameters");
+  let hash = false;
+  let mgf = false;
+  let saltLength = 20;
+  let lastTag = -1;
+  for (const field of derChildren(parts[1].content)) {
+    if (field.tag < 160 || field.tag > 163 || field.tag <= lastTag)
+      throw new Error("Invalid RSA-PSS parameter field");
+    lastTag = field.tag;
+    const values = derChildren(field.content);
+    if (values.length !== 1)
+      throw new Error("Invalid explicit RSA-PSS field");
+    if (field.tag === 160) {
+      hash512(values[0]);
+      hash = true;
+    }
+    if (field.tag === 161) {
+      const mgfParts = derSequence(values[0].encoded);
+      if (mgfParts.length !== 2 || !matchesOid(mgfParts[0], mgf1Oid))
+        throw new Error("RSA-PSS requires MGF1");
+      hash512(mgfParts[1]);
+      mgf = true;
+    }
+    if (field.tag === 162 || field.tag === 163) {
+      const integer = unsignedDerInteger(values[0], true);
+      if (integer.length > 2)
+        throw new Error("Unsupported RSA-PSS integer parameter");
+      const value = integer.reduce((total, byte) => total * 256 + byte, 0);
+      if (field.tag === 162)
+        saltLength = value;
+      else if (value !== 1)
+        throw new Error("Unsupported RSA-PSS trailer");
+    }
+  }
+  if (!hash || !mgf || saltLength > 64)
+    throw new Error("RSA-PSS key restrictions conflict with RFC 9421");
+}
+function normalizePssContainer(data, identifierIndex) {
+  const fields = derSequence(data);
+  validateRfc9421PssParameters(fields[identifierIndex]);
+  const content = fields.flatMap((field, i) => Array.from(i === identifierIndex ? rsaASN1AlgorithmIdentifier : field.encoded));
+  return Uint8Array.from([48, ...genASN1Length(content.length), ...content]).buffer;
+}
+
+// src/pem/spki.ts
+import { ASN1 as ASN12 } from "@lapo/asn1js";
+import { Hex } from "@lapo/asn1js/hex.js";
+import { Base64 } from "@lapo/asn1js/base64.js";
 
 // src/draft/const.ts
 var keyHashAlgosForDraftEncofing = {
@@ -887,8 +948,8 @@ function parseSignInfo(algorithm, real, errorLogger) {
   algorithm = algorithm?.toLowerCase();
   const realKeyType = typeof real === "string" ? real : "algorithm" in real ? getPublicKeyAlgorithmNameFromOid(real.algorithm) : real.name;
   if (realKeyType === "RSA-PSS") {
-    if (algorithm === "rsa-pss-sha512") {
-      return { name: "RSA-PSS", hash: "SHA-512" };
+    if (!algorithm || algorithm === "rsa-pss-sha512") {
+      return { name: "RSA-PSS", hash: "SHA-512", saltLength: 64 };
     }
   }
   if (realKeyType === "RSASSA-PKCS1-v1_5") {
@@ -898,7 +959,7 @@ function parseSignInfo(algorithm, real, errorLogger) {
       return { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" };
     }
     if (algorithm === "rsa-pss-sha512") {
-      return { name: "RSA-PSS", hash: "SHA-512" };
+      return { name: "RSA-PSS", hash: "SHA-512", saltLength: 64 };
     }
     const [parsedName, hash] = algorithm.split("-");
     if (!hash || !(hash in keyHashAlgosForDraftDecoding)) {
@@ -979,7 +1040,7 @@ function getPublicKeyAlgorithmNameFromOid(oidStr) {
   const oid = oidStr.split("\n")[0].trim();
   if (oid === "1.2.840.113549.1.1.1")
     return "RSASSA-PKCS1-v1_5";
-  if (oid === "1.2.840.113549.1.1.7")
+  if (oid === "1.2.840.113549.1.1.10")
     return "RSA-PSS";
   if (oid === "1.2.840.10040.4.1")
     return "DSA";
@@ -1016,7 +1077,7 @@ function asn1ToArrayBuffer(asn1, contentOnly = false) {
   if (typeof fullEnc === "string") {
     return Uint8Array.from(fullEnc.slice(start, end), (s) => s.charCodeAt(0)).buffer;
   } else if (fullEnc instanceof Uint8Array) {
-    return fullEnc.buffer.slice(start, end);
+    return new Uint8Array(fullEnc.subarray(start, end)).buffer;
   }
   if (fullEnc instanceof ArrayBuffer) {
     return new Uint8Array(fullEnc.slice(start, end)).buffer;
@@ -1053,9 +1114,13 @@ function parseSpki(input) {
   const parsed = ASN12.decode(decodePem(input));
   if (!parsed.sub || parsed.sub.length === 0 || parsed.sub.length > 2)
     throw new SpkiParseError("Invalid SPKI (invalid sub)");
+  const identifier = parseAlgorithmIdentifier(parsed.sub[0]);
+  const der = asn1ToArrayBuffer(parsed);
+  if (identifier.algorithm.split("\n")[0] === "1.2.840.113549.1.1.10" && parsed.posEnd() !== parsed.stream.enc.length)
+    throw new SpkiParseError("Trailing PSS key data");
   return {
-    der: asn1ToArrayBuffer(parsed),
-    ...parseAlgorithmIdentifier(parsed.sub[0])
+    der: identifier.algorithm.split("\n")[0] === "1.2.840.113549.1.1.10" ? normalizePssContainer(new Uint8Array(der), 0) : der,
+    ...identifier
   };
 }
 function parsePublicKey(input) {
@@ -1257,6 +1322,11 @@ function genSignInfo(parsed, defaults = defaultSignInfoDefaults) {
   const algorithm = getPublicKeyAlgorithmNameFromOid(parsed.algorithm);
   if (!algorithm)
     throw new KeyValidationError("Unknown algorithm");
+  if (algorithm === "RSA-PSS" || algorithm === "RSASSA-PKCS1-v1_5" && defaults.rsa === "RSA-PSS") {
+    if (defaults.hash !== "SHA-512")
+      throw new KeyValidationError("RFC 9421 RSA-PSS requires SHA-512");
+    return { name: "RSA-PSS", hash: "SHA-512", saltLength: 64 };
+  }
   if (algorithm === "RSASSA-PKCS1-v1_5") {
     return {
       name: "RSASSA-PKCS1-v1_5",
@@ -1281,10 +1351,12 @@ function genSignInfo(parsed, defaults = defaultSignInfoDefaults) {
   throw new KeyValidationError("Unknown algorithm");
 }
 function genAlgorithmForSignAndVerify(keyAlgorithm, hashAlgorithm) {
-  return {
-    hash: hashAlgorithm,
-    ...keyAlgorithm
-  };
+  if (keyAlgorithm.name === "RSA-PSS") {
+    if (hashAlgorithm !== "SHA-512" || keyAlgorithm.hash?.name !== "SHA-512")
+      throw new KeyValidationError("RFC 9421 RSA-PSS requires SHA-512");
+    return { name: "RSA-PSS", hash: "SHA-512", saltLength: 64 };
+  }
+  return { hash: hashAlgorithm, ...keyAlgorithm };
 }
 function splitPer64Chars(str) {
   const result = [];
@@ -2433,6 +2505,8 @@ function parsePkcs8(input) {
   if (!version || !version.tag || version.tag.tagNumber !== 2)
     throw new Pkcs8ParseError("Invalid PKCS#8 (invalid version)");
   const privateKeyAlgorithm = parseAlgorithmIdentifier(parsed.sub[1]);
+  if (privateKeyAlgorithm.algorithm.split("\n")[0] === "1.2.840.113549.1.1.10" && parsed.posEnd() !== parsed.stream.enc.length)
+    throw new Pkcs8ParseError("Trailing PSS key data");
   const privateKey = parsed.sub[2];
   if (!privateKey || !privateKey.tag || privateKey.tag.tagNumber !== 4)
     throw new Pkcs8ParseError("Invalid PKCS#8 (invalid privateKey)");
@@ -2442,7 +2516,7 @@ function parsePkcs8(input) {
       throw new Pkcs8ParseError("Invalid PKCS#8 (invalid attributes)");
   }
   return {
-    der: asn1ToArrayBuffer(parsed),
+    der: privateKeyAlgorithm.algorithm.split("\n")[0] === "1.2.840.113549.1.1.10" ? normalizePssContainer(new Uint8Array(asn1ToArrayBuffer(parsed)), 1) : asn1ToArrayBuffer(parsed),
     ...privateKeyAlgorithm,
     attributesRaw: attributes ? asn1ToArrayBuffer(attributes) : null
   };
@@ -2514,6 +2588,11 @@ var sh4 = __toESM(require_dist(), 1);
 function getRFC9421AlgoString(keyAlgorithm, hashAlgorithm) {
   if (typeof keyAlgorithm === "string") {
     keyAlgorithm = { name: keyAlgorithm };
+  }
+  if (keyAlgorithm.name === "RSA-PSS") {
+    if (hashAlgorithm !== "SHA-512" || keyAlgorithm.hash?.name !== "SHA-512")
+      throw new Error("RFC 9421 RSA-PSS requires SHA-512");
+    return "rsa-pss-sha512";
   }
   if (keyAlgorithm.name === "RSASSA-PKCS1-v1_5") {
     if (hashAlgorithm === "SHA-256")
