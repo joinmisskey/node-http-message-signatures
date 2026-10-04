@@ -50,4 +50,6 @@ export declare function createSlaccSigningKey<Suite>(binding: SlaccBinding<Suite
 export declare function createSlaccVerifier<Suite>(binding: SlaccBinding<Suite>, options: SlaccVerifierOptions): SignatureVerifier;
 /** Explicit compatibility with slacc 0.1.5; only RSA-v1.5/SHA-256 signing is supported. */
 export declare function createLegacySlaccRsaSigningKey(binding: LegacySlaccBinding, options: Omit<SlaccSigningOptions, 'algorithm'>): CustomSigningKey;
+/** slacc 0.1.5 RSA signing plus WebCrypto Ed25519; construct once in the caller's cache. */
+export declare function createLegacySlaccWebCryptoSigningKey(binding: LegacySlaccBinding, options: Omit<SlaccSigningOptions, 'algorithm'>): Promise<CustomSigningKey>;
 export {};

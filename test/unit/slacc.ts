@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import { jest } from '@jest/globals';
-import { createSlaccSigningKey, createSlaccVerifier, createLegacySlaccRsaSigningKey, type SlaccBinding } from '../../src/node/slacc.js';
+import { createSlaccSigningKey, createSlaccVerifier, createLegacySlaccRsaSigningKey, createLegacySlaccWebCryptoSigningKey, type SlaccBinding } from '../../src/node/slacc.js';
 import { importPrivateKey } from '../../src/index.js';
 
 const pair = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -98,4 +98,22 @@ test('keyless verifier rejects unknown versions and configured-operation substit
 	const verifier = createSlaccVerifier(binding(), { algorithm: options.algorithm, publicKey });
 	await expect(verifier({ ...context, version: 'unknown' as 'draft' })).rejects.toThrow('version');
 	await expect(verifier({ ...context, algorithm: { name: 'Ed25519' }, signatureAlgorithm: 'ed25519-sha512' })).rejects.toThrow('operation conflicts');
+});
+
+
+test('legacy hybrid rejects unsupported keys and never falls back after RSA native failure', async () => {
+	const failure = new Error('native construction failed');
+	const fromPem = jest.fn(() => { throw failure; });
+	const native = { RsaKeyPair: { fromPem } };
+	const ec = generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).privateKey.export({ type: 'pkcs8', format: 'der' });
+	await expect(createLegacySlaccWebCryptoSigningKey(native, { ...options, privateKey: ec })).rejects.toThrow('only RSA');
+	expect(fromPem).not.toHaveBeenCalled();
+	await expect(createLegacySlaccWebCryptoSigningKey(native, options)).rejects.toBe(failure);
+	expect(fromPem).toHaveBeenCalledTimes(1);
+	const ed = generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'der' });
+	const key = await createLegacySlaccWebCryptoSigningKey(native, { ...options, privateKey: ed });
+	expect(key.signatureAlgorithm).toBe('ed25519-sha512');
+	await expect(key.signer({ ...context, algorithm: key.algorithm, signatureAlgorithm: key.signatureAlgorithm })).resolves.toHaveLength(64);
+	await expect(key.signer({ ...context, algorithm: key.algorithm, signatureAlgorithm: key.signatureAlgorithm, version: 'rfc9421' })).rejects.toThrow('version');
+	expect(fromPem).toHaveBeenCalledTimes(1);
 });

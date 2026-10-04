@@ -658,6 +658,9 @@ import { ASN1 } from "@lapo/asn1js";
 
 // src/utils.ts
 import { base64 } from "rfc4648";
+async function getWebcrypto() {
+  return globalThis.crypto ?? (await import("node:crypto")).webcrypto;
+}
 function numberToUint8Array(num) {
   const buf = new ArrayBuffer(8);
   const view = new DataView(buf);
@@ -672,6 +675,55 @@ function genASN1Length(length) {
   }
   const lengthUint8Array = numberToUint8Array(length);
   return new Uint8Array([128 + lengthUint8Array.length, ...lengthUint8Array]);
+}
+var KeyValidationError = class extends Error {
+  constructor(message) {
+    super(message);
+  }
+};
+var defaultSignInfoDefaults = {
+  hash: "SHA-256",
+  ec: "DSA"
+};
+function genSignInfo(parsed, defaults = defaultSignInfoDefaults) {
+  const algorithm = getPublicKeyAlgorithmNameFromOid(parsed.algorithm);
+  if (!algorithm)
+    throw new KeyValidationError("Unknown algorithm");
+  if (algorithm === "RSA-PSS" || algorithm === "RSASSA-PKCS1-v1_5" && defaults.rsa === "RSA-PSS") {
+    if (defaults.hash !== "SHA-512")
+      throw new KeyValidationError("RFC 9421 RSA-PSS requires SHA-512");
+    return { name: "RSA-PSS", hash: "SHA-512", saltLength: 64 };
+  }
+  if (algorithm === "RSASSA-PKCS1-v1_5") {
+    return {
+      name: "RSASSA-PKCS1-v1_5",
+      hash: defaults.hash ?? "SHA-256"
+    };
+  }
+  if (algorithm === "EC") {
+    if (typeof parsed.parameter !== "string")
+      throw new KeyValidationError("Invalid EC parameter");
+    return {
+      name: `EC${defaults.ec}`,
+      hash: defaults.hash ?? "SHA-256",
+      namedCurve: getNistCurveFromOid(parsed.parameter)
+    };
+  }
+  if (algorithm === "Ed25519") {
+    return { name: "Ed25519" };
+  }
+  if (algorithm === "Ed448") {
+    return { name: "Ed448" };
+  }
+  throw new KeyValidationError("Unknown algorithm");
+}
+function genAlgorithmForSignAndVerify(keyAlgorithm, hashAlgorithm) {
+  if (keyAlgorithm.name === "RSA-PSS") {
+    if (hashAlgorithm !== "SHA-512" || keyAlgorithm.hash?.name !== "SHA-512")
+      throw new KeyValidationError("RFC 9421 RSA-PSS requires SHA-512");
+    return { name: "RSA-PSS", hash: "SHA-512", saltLength: 64 };
+  }
+  return { hash: hashAlgorithm, ...keyAlgorithm };
 }
 
 // src/pem/pkcs1.ts
@@ -769,8 +821,113 @@ function genPkcs8FromPkcs1(input) {
 // src/draft/verify.ts
 import { base64 as base642 } from "rfc4648";
 
+// src/pem/pss.ts
+var sha512Oid = [96, 134, 72, 1, 101, 3, 4, 2, 3];
+var mgf1Oid = [42, 134, 72, 134, 247, 13, 1, 1, 8];
+function matchesOid(element, expected) {
+  return element.tag === 6 && element.content.length === expected.length && element.content.every((byte, i) => byte === expected[i]);
+}
+function hash512(element) {
+  if (element.tag !== 48)
+    throw new Error("Invalid PSS hash identifier");
+  const parts = derChildren(element.content);
+  if (parts.length < 1 || parts.length > 2 || !matchesOid(parts[0], sha512Oid) || parts[1] && (parts[1].tag !== 5 || parts[1].content.length)) {
+    throw new Error("RSA-PSS requires SHA-512");
+  }
+}
+function validateRfc9421PssParameters(identifier) {
+  const parts = derSequence(identifier.encoded);
+  if (parts.length === 1)
+    return;
+  if (parts.length !== 2 || parts[1].tag !== 48)
+    throw new Error("Invalid RSA-PSS parameters");
+  let hash = false;
+  let mgf = false;
+  let saltLength = 20;
+  let lastTag = -1;
+  for (const field of derChildren(parts[1].content)) {
+    if (field.tag < 160 || field.tag > 163 || field.tag <= lastTag)
+      throw new Error("Invalid RSA-PSS parameter field");
+    lastTag = field.tag;
+    const values = derChildren(field.content);
+    if (values.length !== 1)
+      throw new Error("Invalid explicit RSA-PSS field");
+    if (field.tag === 160) {
+      hash512(values[0]);
+      hash = true;
+    }
+    if (field.tag === 161) {
+      const mgfParts = derSequence(values[0].encoded);
+      if (mgfParts.length !== 2 || !matchesOid(mgfParts[0], mgf1Oid))
+        throw new Error("RSA-PSS requires MGF1");
+      hash512(mgfParts[1]);
+      mgf = true;
+    }
+    if (field.tag === 162 || field.tag === 163) {
+      const integer = unsignedDerInteger(values[0], true);
+      if (integer.length > 2)
+        throw new Error("Unsupported RSA-PSS integer parameter");
+      const value = integer.reduce((total, byte) => total * 256 + byte, 0);
+      if (field.tag === 162)
+        saltLength = value;
+      else if (value !== 1)
+        throw new Error("Unsupported RSA-PSS trailer");
+    }
+  }
+  if (!hash || !mgf || saltLength > 64)
+    throw new Error("RSA-PSS key restrictions conflict with RFC 9421");
+}
+function normalizePssContainer(data, identifierIndex) {
+  const fields = derSequence(data);
+  validateRfc9421PssParameters(fields[identifierIndex]);
+  const content = fields.flatMap((field, i) => Array.from(i === identifierIndex ? rsaASN1AlgorithmIdentifier : field.encoded));
+  return Uint8Array.from([48, ...genASN1Length(content.length), ...content]).buffer;
+}
+
 // src/pem/pkcs8.ts
 import { ASN1 as ASN12 } from "@lapo/asn1js";
+var Pkcs8ParseError = class extends Error {
+  constructor(message) {
+    super(message);
+  }
+};
+function parsePkcs8(input) {
+  const parsed = ASN12.decode(decodePem(input));
+  if (!parsed.sub || parsed.sub.length < 3 || parsed.sub.length > 4)
+    throw new Pkcs8ParseError("Invalid PKCS#8 (invalid sub length)");
+  const version = parsed.sub[0];
+  if (!version || !version.tag || version.tag.tagNumber !== 2)
+    throw new Pkcs8ParseError("Invalid PKCS#8 (invalid version)");
+  const privateKeyAlgorithm = parseAlgorithmIdentifier(parsed.sub[1]);
+  if (privateKeyAlgorithm.algorithm.split("\n")[0] === "1.2.840.113549.1.1.10" && parsed.posEnd() !== parsed.stream.enc.length)
+    throw new Pkcs8ParseError("Trailing PSS key data");
+  const privateKey2 = parsed.sub[2];
+  if (!privateKey2 || !privateKey2.tag || privateKey2.tag.tagNumber !== 4)
+    throw new Pkcs8ParseError("Invalid PKCS#8 (invalid privateKey)");
+  const attributes = parsed.sub[3];
+  if (attributes) {
+    if (attributes.tag.tagNumber !== 49)
+      throw new Pkcs8ParseError("Invalid PKCS#8 (invalid attributes)");
+  }
+  return {
+    der: privateKeyAlgorithm.algorithm.split("\n")[0] === "1.2.840.113549.1.1.10" ? normalizePssContainer(new Uint8Array(asn1ToArrayBuffer(parsed)), 1) : asn1ToArrayBuffer(parsed),
+    ...privateKeyAlgorithm,
+    attributesRaw: attributes ? asn1ToArrayBuffer(attributes) : null
+  };
+}
+async function importPrivateKey(key, keyUsages = ["sign"], defaults = defaultSignInfoDefaults, extractable = false) {
+  if (typeof key === "object" && "kty" in key)
+    return importPrivateJwk(key, keyUsages, defaults, extractable);
+  key = key;
+  let parsedPrivateKey;
+  try {
+    parsedPrivateKey = parsePkcs8(key);
+  } catch {
+    parsedPrivateKey = parsePkcs8(genPkcs8FromPkcs1(key));
+  }
+  const importParams = genSignInfo(parsedPrivateKey, defaults);
+  return await (await getWebcrypto()).subtle.importKey("pkcs8", parsedPrivateKey.der, importParams, extractable, keyUsages);
+}
 
 // src/const.ts
 var textEncoder = new TextEncoder();
@@ -808,6 +965,21 @@ function validateSignatureOperation(version, wire2, operation2) {
   if (expected.name !== operation2.name || "hash" in expected && (!("hash" in operation2) || expected.hash !== operation2.hash) || "namedCurve" in expected && (!("namedCurve" in operation2) || expected.namedCurve !== operation2.namedCurve))
     throw new Error("Operation conflicts with wire algorithm");
   return expected;
+}
+function validateOperationKey(key, operation2, usage) {
+  if (key.type !== (usage === "sign" ? "private" : "public") || !key.usages.includes(usage) || key.algorithm.name !== operation2.name)
+    throw new Error("CryptoKey is incompatible with signature operation");
+  if ("hash" in key.algorithm && (!("hash" in operation2) || key.algorithm.hash.name !== operation2.hash))
+    throw new Error("CryptoKey hash conflicts with signature operation");
+  if ("namedCurve" in key.algorithm && (!("namedCurve" in operation2) || key.algorithm.namedCurve !== operation2.namedCurve))
+    throw new Error("CryptoKey curve conflicts with signature operation");
+}
+async function webCryptoSigner(context) {
+  validateSignatureOperation(context.version, context.signatureAlgorithm, context.algorithm);
+  if (!context.key)
+    throw new Error("WebCrypto signing requires a private key");
+  validateOperationKey(context.key, context.algorithm, "sign");
+  return new Uint8Array(await (await getWebcrypto()).subtle.sign(context.algorithm, context.key, textEncoder.encode(context.signingString)));
 }
 
 // src/rfc9421/verify.ts
@@ -899,6 +1071,67 @@ function parseSignInfo(algorithm, real, errorLogger) {
   throw new KeyHashValidationError(`unsupported keyAlgorithm: ${realKeyType} (provided: ${algorithm})`);
 }
 
+// src/pem/jwk.ts
+var jwkAlgorithms = {
+  RS256: "rsa-sha256",
+  RS384: "rsa-sha384",
+  RS512: "rsa-sha512",
+  PS512: "rsa-pss-sha512",
+  ES256: "ecdsa-p256-sha256",
+  ES384: "ecdsa-p384-sha384",
+  ES512: "ecdsa-sha512"
+};
+var privateMembers = ["d", "p", "q", "dp", "dq", "qi", "oth", "k"];
+function operationForJwk(jwk, wire2, defaults = defaultSignInfoDefaults) {
+  let real;
+  if (jwk.kty === "RSA")
+    real = { name: "RSASSA-PKCS1-v1_5" };
+  else if (jwk.kty === "EC" && ["P-256", "P-384", "P-521"].includes(jwk.crv ?? ""))
+    real = { name: "ECDSA", namedCurve: jwk.crv };
+  else if (jwk.kty === "OKP" && ["Ed25519", "Ed448"].includes(jwk.crv ?? ""))
+    real = { name: jwk.crv };
+  else
+    throw new Error("Unsupported signature JWK key type or curve");
+  let declared;
+  if (jwk.alg !== void 0) {
+    declared = jwk.alg === "EdDSA" && jwk.kty === "OKP" ? jwk.crv.toLowerCase() : jwkAlgorithms[jwk.alg];
+    if (!declared)
+      throw new Error("Unsupported JWK alg");
+    if (jwk.alg === "ES512" && jwk.crv !== "P-521")
+      throw new Error("ES512 requires P-521");
+  }
+  const fallback = real.name === "RSASSA-PKCS1-v1_5" ? defaults.rsa === "RSA-PSS" ? "rsa-pss-sha512" : `rsa-${defaults.hash?.replace("-", "").toLowerCase()}` : real.name === "ECDSA" ? `ecdsa-${defaults.hash?.replace("-", "").toLowerCase()}` : real.name.toLowerCase();
+  const operation2 = parseSignInfo(wire2 ?? declared ?? fallback, real);
+  if (declared && JSON.stringify(parseSignInfo(declared, real)) !== JSON.stringify(operation2))
+    throw new Error("JWK alg conflicts with requested signature algorithm");
+  return operation2;
+}
+async function importSignatureJwk(jwk, privateKey2, keyUsages, defaults = defaultSignInfoDefaults, extractable = false, providedAlgorithm) {
+  if (!jwk || typeof jwk !== "object" || Array.isArray(jwk))
+    throw new Error("Invalid JWK");
+  if (jwk.use !== void 0 && jwk.use !== "sig")
+    throw new Error("JWK use must be sig");
+  if (jwk.ext !== void 0 && typeof jwk.ext !== "boolean")
+    throw new Error("Invalid JWK ext");
+  if (extractable && jwk.ext === false)
+    throw new Error("Nonextractable JWK");
+  const expectedUsage = privateKey2 ? "sign" : "verify";
+  if (!keyUsages.length || keyUsages.some((usage) => usage !== expectedUsage))
+    throw new Error("Invalid signature key usage");
+  if (jwk.key_ops !== void 0 && (!Array.isArray(jwk.key_ops) || new Set(jwk.key_ops).size !== jwk.key_ops.length || jwk.key_ops.some((usage) => usage !== expectedUsage) || !jwk.key_ops.includes(expectedUsage)))
+    throw new Error("JWK key_ops conflicts with requested usage");
+  if (!privateKey2 && privateMembers.some((member) => member in jwk))
+    throw new Error("Private or secret material in public JWK");
+  if (privateKey2 && (typeof jwk.d !== "string" || !jwk.d))
+    throw new Error("Missing JWK private key material");
+  const operation2 = operationForJwk(jwk, providedAlgorithm, defaults);
+  const key = await (await getWebcrypto()).subtle.importKey("jwk", jwk, operation2, extractable, keyUsages);
+  return { key, algorithm: genAlgorithmForSignAndVerify(key.algorithm, "hash" in operation2 ? operation2.hash : null) };
+}
+async function importPrivateJwk(jwk, keyUsages = ["sign"], defaults = defaultSignInfoDefaults, extractable = false) {
+  return (await importSignatureJwk(jwk, true, keyUsages, defaults, extractable)).key;
+}
+
 // src/pem/spki.ts
 import { ASN1 as ASN13 } from "@lapo/asn1js";
 import { Hex } from "@lapo/asn1js/hex.js";
@@ -968,6 +1201,25 @@ function decodePem(input) {
   if (length > 1024 * 1024)
     throw new SpkiParseError("Decoded key exceeds 1 MiB limit");
   return der;
+}
+function parseAlgorithmIdentifier(input) {
+  const algorithmIdentifierSub = input.sub;
+  if (!algorithmIdentifierSub)
+    throw new SpkiParseError("Invalid AlgorithmIdentifier");
+  if (algorithmIdentifierSub.length === 0)
+    throw new SpkiParseError("Invalid AlgorithmIdentifier (sub length, zero)");
+  if (algorithmIdentifierSub.length > 2)
+    throw new SpkiParseError("Invalid AlgorithmIdentifier (sub length, too many)");
+  if (algorithmIdentifierSub[0].tag.tagNumber !== 6)
+    throw new SpkiParseError("Invalid AlgorithmIdentifier (.sub[0] type)");
+  const algorithm = algorithmIdentifierSub[0]?.content() ?? null;
+  if (typeof algorithm !== "string")
+    throw new SpkiParseError("Invalid AlgorithmIdentifier (invalid content)");
+  const parameter = algorithmIdentifierSub[1]?.content() ?? null;
+  return {
+    algorithm,
+    parameter
+  };
 }
 
 // src/node/slacc.ts
@@ -1146,8 +1398,41 @@ function createLegacySlaccRsaSigningKey(binding, options) {
     return Uint8Array.from(await invoke((callback) => handle.sign(Buffer2.from(context.signingString, "utf8"), callback), (result) => Buffer2.isBuffer(result) && result.length === signatureLength));
   } };
 }
+async function createLegacySlaccWebCryptoSigningKey(binding, options) {
+  const { keyId, version, privateKey: input } = options;
+  const fields = derSequence(bytes(input));
+  let selection;
+  if (fields.length === 9 && fields.every((field) => field.tag === 2))
+    selection = "rsa-v1_5-sha256";
+  else {
+    if (fields.length !== 3)
+      throw new Error("Expected unencrypted PKCS#8 or PKCS#1");
+    const identifier = derSequence(fields[1].encoded);
+    if (identifier[0]?.tag !== 6)
+      throw new Error("Expected key algorithm OID");
+    const oid = Buffer2.from(identifier[0].content).toString("hex");
+    if (oid === "2b6570")
+      selection = "ed25519";
+    else if (oid === "2a864886f70d010101")
+      selection = "rsa-v1_5-sha256";
+    else
+      throw new Error("Legacy slacc/WebCrypto supports only RSA-v1.5/SHA-256 and Ed25519");
+  }
+  const signatureAlgorithm = wire(version, selection);
+  const parsed = privateKey(input, selection);
+  if (selection === "rsa-v1_5-sha256")
+    return createLegacySlaccRsaSigningKey(binding, { keyId, version, privateKey: parsed.der });
+  const key = await importPrivateKey(parsed.der);
+  return { keyId, algorithm: operation(selection), signatureAlgorithm, signer: async (context) => {
+    checkContext(context, selection, version);
+    if (context.keyId !== keyId)
+      throw new Error("Signer key ID conflicts with slacc adapter");
+    return webCryptoSigner({ ...context, key });
+  } };
+}
 export {
   createLegacySlaccRsaSigningKey,
+  createLegacySlaccWebCryptoSigningKey,
   createSlaccSigningKey,
   createSlaccVerifier
 };

@@ -203,15 +203,15 @@ Keys are explicit PEM strings, Uint8Array/Buffer DER, or ArrayBuffer DER. Unencr
 
 The verifier closes over one trusted public key and requires a **keyless context**. Use `{ verifier }` with no `keys`/`resolveKey`; supplying a CryptoKey in the context is rejected. High-level keyless verification requires an explicit, unambiguous wire algorithm; use the existing keyed WebCrypto path for omitted `alg` or ambiguous draft `hs2019`. A multi-key application must route by trusted key ID/label to the appropriate verifier itself and enforce identity authorization. No key lookup or network access is performed. Unsupported operations throw; callback errors propagate, false verification remains false, and there is no automatic backend fallback. If needed, callers explicitly route other operations to `webCryptoVerifier` before invoking an adapter.
 
-Current Misskey uses slacc **0.1.5**, whose API supports RSA signing only. It can use `createLegacySlaccRsaSigningKey` without upgrading slacc; keep incoming verification on the existing WebCrypto path. For example, inside a Misskey service that already initializes slacc once at startup:
+The investigated `tamaina/misskey` `p1-3` integration uses slacc **0.1.5**, whose API supports RSA signing only. It can use `createLegacySlaccWebCryptoSigningKey` without upgrading slacc; this async factory routes validated RSA to slacc and Ed25519 to WebCrypto and returns the same `CustomSigningKey` type for both. It rejects other algorithms and never switches backend after a failure. The narrower `createLegacySlaccRsaSigningKey` remains available for explicit RSA-only routing; keep incoming verification on the existing WebCrypto path. For example, inside a Misskey service that already initializes slacc once at startup:
 
 ```ts
 import * as slacc from 'slacc'; // application-owned slacc 0.1.5
-import { createLegacySlaccRsaSigningKey } from '@misskey-dev/node-http-message-signatures/node/slacc';
+import { createLegacySlaccWebCryptoSigningKey } from '@misskey-dev/node-http-message-signatures/node/slacc';
 import { signAsDraftToRequest, parseRequestSignature, verifyParsedSignature } from '@misskey-dev/node-http-message-signatures';
 
 // Construct when the local actor's key changes; cache according to the application's key lifecycle.
-const signingKey = createLegacySlaccRsaSigningKey(slacc, {
+const signingKey = await createLegacySlaccWebCryptoSigningKey(slacc, {
   keyId: actorKeyId, version: 'draft', privateKey: actorPrivateKeyPem,
 });
 await signAsDraftToRequest(request, signingKey, ['(request-target)', 'host', 'date']);
@@ -222,3 +222,5 @@ const valid = await verifyParsedSignature(parseRequestSignature(incomingRequest)
 For modern slacc, import `createSlaccSigningKey`/`createSlaccVerifier`, pass the application's 0.2 binding, and select the algorithm explicitly. slacc's `init(threadCount)` must run once before signing/verifying; Misskey already owns this initialization. The native API has no shutdown, cancellation or queue-limit controls. Avoid creating duplicate pools or handles per request. The adapters call `signRaw`/`verifyRaw` (legacy `sign`) over the exact UTF-8 signature base; `*Parts` hashing is incompatible with HTTP signature bases and is never used.
 
 Native tests execute 0.1.5 and 0.2.0 in separate processes. Run the opt-in bounded benchmark with `pnpm performance:slacc modern` or `pnpm performance:slacc legacy`: it compares cold construction and warm reused handles with WebCrypto for RSA 2048/4096 and modern Ed25519 at concurrency 1/16, using one slacc thread by default. For a matched four-thread comparison, run `UV_THREADPOOL_SIZE=4 pnpm performance:slacc modern 4` (or `legacy 4`) in a fresh process. Results depend on workload and machine; no general speedup is promised. Browser and edge applications should import the main entry point, not the Node adapter.
+
+Populate the caller-owned key cache with the factory result, then pass it directly to `signAsDraftToRequest`. Bind cache identity to key material, key ID and signature version, and invalidate on rotation/refresh. Construction, PEM parsing and WebCrypto import happen on cache misses, not on each signature. Queue payloads remain PEM; reconstruct/cache the signing key in the worker. The adapter owns no global cache or thread pool.

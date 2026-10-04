@@ -1,6 +1,6 @@
 import * as modern from 'slacc-modern';
 import * as legacy from 'slacc-legacy';
-import { createSlaccSigningKey, createSlaccVerifier, createLegacySlaccRsaSigningKey } from '@misskey-dev/node-http-message-signatures/node/slacc';
+import { createSlaccSigningKey, createSlaccVerifier, createLegacySlaccRsaSigningKey, createLegacySlaccWebCryptoSigningKey } from '@misskey-dev/node-http-message-signatures/node/slacc';
 import type { CustomSigningKey, SignatureVerifier } from '@misskey-dev/node-http-message-signatures';
 const options = { keyId: 'actor', version: 'draft' as const, algorithm: 'rsa-v1_5-sha256' as const, privateKey: 'PEM' };
 const key: CustomSigningKey = createSlaccSigningKey(modern, options);
@@ -15,3 +15,6 @@ createSlaccSigningKey(modern, { keyId: 'actor', algorithm: 'ed25519', privateKey
 createSlaccSigningKey(modern, { ...options, privateKey: {} as CryptoKey });
 // @ts-expect-error Legacy slacc has no modern Verifier.
 createSlaccVerifier(legacy, { algorithm: 'rsa-v1_5-sha256', publicKey: 'PEM' });
+
+const hybrid: Promise<CustomSigningKey> = createLegacySlaccWebCryptoSigningKey(legacy, options);
+void hybrid;

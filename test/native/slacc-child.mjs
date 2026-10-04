@@ -73,4 +73,13 @@ check(typeof cjs.createSlaccVerifier === 'function' && typeof esm.createLegacySl
 const cjsKey = (modern ? cjs.createSlaccSigningKey : cjs.createLegacySlaccRsaSigningKey)(binding, { keyId: 'actor', version: 'draft', algorithm: 'rsa-v1_5-sha256', privateKey: input });
 check(verify('sha256', Buffer.from('CommonJS raw'), rsa.publicKey, await cjsKey.signer({ version: 'draft', keyId: 'actor', signatureAlgorithm: cjsKey.signatureAlgorithm, algorithm: cjsKey.algorithm, signingString: 'CommonJS raw' })));
 if (modern) check(await cjs.createSlaccVerifier(binding, { algorithm: 'rsa-v1_5-sha256', publicKey: rsa.publicKey.export({ type: 'spki', format: 'der' }) })({ version: 'draft', signatureAlgorithm: cjsKey.signatureAlgorithm, algorithm: cjsKey.algorithm, signingString: 'CommonJS raw', signature: sign('sha256', Buffer.from('CommonJS raw'), rsa.privateKey) }));
+if (!modern) {
+  for (const pair of [rsa, ed]) for (const version of ['draft', 'rfc9421']) {
+    const key = await adapter.createLegacySlaccWebCryptoSigningKey(binding, { keyId: 'actor', version, privateKey: pair.privateKey.export({ type: 'pkcs8', format: 'der' }) });
+    const request = { method: 'GET', url: 'https://example.com/inbox?q=1', headers: { host: 'example.com' } };
+    if (version === 'draft') await api.signAsDraftToRequest(request, key, ['(request-target)', 'host']);
+    else await api.signAsRFC9421ToRequestOrResponse(request, { sig: { key, identifiers: ['@method', '@target-uri', 'host'] } });
+    check(await api.verifyParsedSignature(api.parseRequestSignature(request), pair.publicKey.export({ type: 'spki', format: 'pem' }).toString()));
+  }
+}
 console.log(JSON.stringify({ version: modern ? '0.2.0' : '0.1.5', checks }));
