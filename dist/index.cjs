@@ -747,6 +747,8 @@ function derChildren(data) {
   const children = [];
   for (let offset = 0; offset < data.length; ) {
     const child = readDer(data, offset);
+    if (children.length >= 64)
+      throw new Error("Too many DER fields");
     children.push(child);
     offset = child.end;
   }
@@ -1285,6 +1287,20 @@ function operationWithoutKey(version, wire) {
     return parseSignInfo(wire, { name: "RSASSA-PKCS1-v1_5" });
   throw new Error("Keyless verification requires an unambiguous signature algorithm");
 }
+function operationFromImport(imported) {
+  const raw = imported.algorithm;
+  const rawHash = "hash" in raw ? raw.hash : null;
+  const hash = typeof rawHash === "object" && rawHash !== null ? rawHash.name : rawHash;
+  if (raw.name === "Ed25519" || raw.name === "Ed448")
+    return { name: raw.name };
+  if (raw.name === "RSASSA-PKCS1-v1_5")
+    return { name: raw.name, hash };
+  if (raw.name === "RSA-PSS")
+    return { name: raw.name, hash, saltLength: 64 };
+  if (raw.name === "ECDSA")
+    return { name: raw.name, hash, namedCurve: imported.publicKey.algorithm.namedCurve };
+  throw new Error("Unsupported imported signature operation");
+}
 function validateOperationKey(key, operation, usage) {
   if (key.type !== (usage === "sign" ? "private" : "public") || !key.usages.includes(usage) || key.algorithm.name !== operation.name)
     throw new Error("CryptoKey is incompatible with signature operation");
@@ -1353,8 +1369,9 @@ async function verifyDraftSignature(parsed, keyOrOptions, errorLogger) {
       continue;
     let context;
     try {
-      const key = candidate === void 0 ? void 0 : (await parseAndImportPublicKey(candidate, ["verify"], parsed.algorithm)).publicKey;
-      const algorithm = key ? parseSignInfo(parsed.algorithm, key.algorithm) : operationWithoutKey("draft", parsed.algorithm.toLowerCase());
+      const imported = candidate === void 0 ? void 0 : await parseAndImportPublicKey(candidate, ["verify"], parsed.algorithm);
+      const key = imported?.publicKey;
+      const algorithm = imported ? operationFromImport(imported) : operationWithoutKey("draft", parsed.algorithm.toLowerCase());
       const signatureAlgorithm = parsed.algorithm?.toLowerCase() ?? getDraftAlgoString(key.algorithm.name, "hash" in algorithm ? algorithm.hash : null);
       validateSignatureOperation("draft", signatureAlgorithm, algorithm);
       if (key)
@@ -1399,6 +1416,7 @@ async function verifyRFC9421Signature(parsedEntries, keysOrOptions, options, err
   }
   if (!verifyAll)
     toVerify.sort(([, a], [, b]) => algorithms.indexOf(a.algorithm?.toLowerCase()) - algorithms.indexOf(b.algorithm?.toLowerCase()));
+  let eligibleSignatures = 0;
   for (const [label, parsed] of toVerify) {
     const wire = parsed.algorithm?.toLowerCase();
     if (wire) {
@@ -1420,22 +1438,30 @@ async function verifyRFC9421Signature(parsedEntries, keysOrOptions, options, err
     } else
       candidates = keys === void 0 ? settings.verifier && wire ? [void 0] : [] : [keys];
     let verified = false;
+    let eligible = wire !== void 0 || candidates.length === 0;
     for (const candidate of candidates) {
-      if (candidate === void 0 && (keys !== void 0 || settings.resolveKey))
+      if (candidate === void 0 && (keys !== void 0 || settings.resolveKey)) {
+        eligible = true;
         continue;
+      }
       let key;
       let operation;
       let signature;
       let signatureAlgorithm;
       try {
-        key = candidate === void 0 ? void 0 : (await parseAndImportPublicKey(candidate, ["verify"], wire)).publicKey;
-        operation = key ? parseSignInfo(wire, key.algorithm) : operationWithoutKey("rfc9421", wire);
+        const imported = candidate === void 0 ? void 0 : await parseAndImportPublicKey(candidate, ["verify"], wire);
+        key = imported?.publicKey;
+        operation = imported ? operationFromImport(imported) : operationWithoutKey("rfc9421", wire);
         signatureAlgorithm = wire ?? getRFC9421AlgoString(key.algorithm, "hash" in operation ? operation.hash : null);
+        if (!algorithms.includes(signatureAlgorithm))
+          continue;
+        eligible = true;
         validateSignatureOperation("rfc9421", signatureAlgorithm, operation);
         if (key)
           validateOperationKey(key, operation, "verify");
         signature = import_rfc46482.base64.parse(parsed.signature);
       } catch (error) {
+        eligible = true;
         logger?.(`Invalid candidate in ${label}: ${error}`);
         continue;
       }
@@ -1456,12 +1482,15 @@ async function verifyRFC9421Signature(parsedEntries, keysOrOptions, options, err
       if (verified)
         break;
     }
+    if (!eligible)
+      continue;
+    eligibleSignatures++;
     if (verifyAll && !verified)
       return false;
     if (!verifyAll && verified)
       return true;
   }
-  return verifyAll;
+  return verifyAll && eligibleSignatures > 0;
 }
 
 // src/shared/verify.ts
@@ -1713,7 +1742,13 @@ function asn1ToArrayBuffer(asn1, contentOnly = false) {
 }
 var reHex = /^\s*(?:[0-9A-Fa-f][0-9A-Fa-f]\s*)+$/;
 function decodePem(input) {
+  if (typeof input === "string" && input.length > 4 * 1024 * 1024)
+    throw new SpkiParseError("Encoded key exceeds 4 MiB limit");
   const der = typeof input === "string" ? reHex.test(input) ? import_hex.Hex.decode(input) : import_base64.Base64.unarmor(input) : input;
+  const data = typeof der === "object" && "enc" in der ? der.enc : der;
+  const length = data instanceof ArrayBuffer ? data.byteLength : data.length;
+  if (length > 1024 * 1024)
+    throw new SpkiParseError("Decoded key exceeds 1 MiB limit");
   return der;
 }
 function parseAlgorithmIdentifier(input) {
@@ -2081,7 +2116,7 @@ var RFC9421SignatureBaseFactory = class {
    *
    * @param source request or response, must include 'signature-input' header
    *	If source is node response, it must include 'req' property.
-   * @param scheme optional, used when source request url starts with '/'
+   * @param scheme optional, used when source request url starts with '/'.
    * @param additionalSfvTypeDictionary additional SFV type dictionary
    * @param request optional, used when source is a browser Response
    * @param requiredComponents

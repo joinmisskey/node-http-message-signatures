@@ -1,9 +1,9 @@
 import { base64 } from 'rfc4648';
 import { parseAndImportPublicKey } from '../pem/spki.js';
 import { parseSignInfo } from '../shared/verify.js';
-import { isVerificationOptions, validateSignatureAlgorithm, operationWithoutKey, validateOperationKey, validateSignatureOperation, webCryptoVerifier } from '../shared/backend.js';
+import { operationFromImport, isVerificationOptions, validateSignatureAlgorithm, operationWithoutKey, validateOperationKey, validateSignatureOperation, webCryptoVerifier } from '../shared/backend.js';
 import { getDraftAlgoString } from './sign.js';
-import type { ParsedDraftSignature, PublicKeySource, SignatureOperation, VerificationOptions } from '../types.js';
+import type { ParsedDraftSignature, PublicKeySource, VerificationOptions } from '../types.js';
 /** @deprecated Use parseSignInfo */
 export const genSignInfoDraft = parseSignInfo;
 export function verifyDraftSignature(parsed: ParsedDraftSignature['value'], options: VerificationOptions): Promise<boolean>;
@@ -23,8 +23,9 @@ export async function verifyDraftSignature(parsed: ParsedDraftSignature['value']
 		if (candidate === undefined && (options.keys !== undefined || options.resolveKey)) continue;
 		let context;
 		try {
-			const key = candidate === undefined ? undefined : (await parseAndImportPublicKey(candidate, ['verify'], parsed.algorithm)).publicKey;
-			const algorithm = key ? parseSignInfo(parsed.algorithm, key.algorithm) as SignatureOperation : operationWithoutKey('draft', parsed.algorithm!.toLowerCase());
+			const imported = candidate === undefined ? undefined : await parseAndImportPublicKey(candidate, ['verify'], parsed.algorithm);
+			const key = imported?.publicKey;
+			const algorithm = imported ? operationFromImport(imported) : operationWithoutKey('draft', parsed.algorithm!.toLowerCase());
 			const signatureAlgorithm = parsed.algorithm?.toLowerCase() ?? getDraftAlgoString(key!.algorithm.name, 'hash' in algorithm ? algorithm.hash : null);
 			validateSignatureOperation('draft', signatureAlgorithm, algorithm);
 			if (key) validateOperationKey(key, algorithm, 'verify');

@@ -1,8 +1,7 @@
 import { base64 } from 'rfc4648';
 import { ParsedRFC9421Signature, PublicKeySource, RFC9421SignatureAlgorithm, SignatureOperation, VerificationOptions } from '../types.js';
 import { parseAndImportPublicKey } from '../pem/spki.js';
-import { parseSignInfo } from '../shared/verify.js';
-import { isVerificationOptions, validateSignatureAlgorithm, operationWithoutKey, validateOperationKey, validateSignatureOperation, webCryptoVerifier } from '../shared/backend.js';
+import { operationFromImport, isVerificationOptions, validateSignatureAlgorithm, operationWithoutKey, validateOperationKey, validateSignatureOperation, webCryptoVerifier } from '../shared/backend.js';
 import { getRFC9421AlgoString } from './sign.js';
 
 const algorithmsDefault = ['ed25519', 'rsa-pss-sha512', 'ecdsa-p384-sha384', 'ecdsa-p256-sha256', 'hmac-sha256', 'rsa-v1_5-sha256'] satisfies RFC9421SignatureAlgorithm[];
@@ -27,6 +26,7 @@ export async function verifyRFC9421Signature(
 	const toVerify = parsedEntries.filter(([, parsed]) => !parsed.algorithm || algorithms.includes(parsed.algorithm.toLowerCase() as RFC9421SignatureAlgorithm));
 	if (!toVerify.length) { logger?.('No matched signature found'); return false; }
 	if (!verifyAll) toVerify.sort(([, a], [, b]) => algorithms.indexOf(a.algorithm?.toLowerCase() as RFC9421SignatureAlgorithm) - algorithms.indexOf(b.algorithm?.toLowerCase() as RFC9421SignatureAlgorithm));
+	let eligibleSignatures = 0;
 	for (const [label, parsed] of toVerify) {
 		const wire = parsed.algorithm?.toLowerCase();
 		if (wire) {
@@ -40,20 +40,24 @@ export async function verifyRFC9421Signature(
 			candidates = keys.has(label) ? [keys.get(label)] : parsed.keyid !== undefined ? keys.has(parsed.keyid) ? [keys.get(parsed.keyid)] : [] : wire ? [...keys.values()] : [];
 		} else candidates = keys === undefined ? settings.verifier && wire ? [undefined] : [] : [keys];
 		let verified = false;
+		let eligible = wire !== undefined || candidates.length === 0;
 		for (const candidate of candidates) {
-			if (candidate === undefined && (keys !== undefined || settings.resolveKey)) continue;
+			if (candidate === undefined && (keys !== undefined || settings.resolveKey)) { eligible = true; continue; }
 			let key: CryptoKey | undefined;
 			let operation: SignatureOperation;
 			let signature: Uint8Array;
 			let signatureAlgorithm: string;
 			try {
-				key = candidate === undefined ? undefined : (await parseAndImportPublicKey(candidate, ['verify'], wire)).publicKey;
-				operation = key ? parseSignInfo(wire, key.algorithm) as SignatureOperation : operationWithoutKey('rfc9421', wire!);
+				const imported = candidate === undefined ? undefined : await parseAndImportPublicKey(candidate, ['verify'], wire);
+				key = imported?.publicKey;
+				operation = imported ? operationFromImport(imported) : operationWithoutKey('rfc9421', wire!);
 				signatureAlgorithm = wire ?? getRFC9421AlgoString(key!.algorithm, 'hash' in operation ? operation.hash : null);
+				if (!algorithms.includes(signatureAlgorithm as RFC9421SignatureAlgorithm)) continue;
+				eligible = true;
 				validateSignatureOperation('rfc9421', signatureAlgorithm, operation);
 				if (key) validateOperationKey(key, operation, 'verify');
 				signature = base64.parse(parsed.signature);
-			} catch (error) { logger?.(`Invalid candidate in ${label}: ${error}`); continue; }
+			} catch (error) { eligible = true; logger?.(`Invalid candidate in ${label}: ${error}`); continue; }
 			const context = { version: 'rfc9421' as const, label, keyId: parsed.keyid, key, algorithm: operation, signatureAlgorithm, signature, signingString: parsed.base };
 			if (settings.verifier) {
 				// Backend errors propagate. False ends this signature without another backend/key attempt.
@@ -65,8 +69,10 @@ export async function verifyRFC9421Signature(
 			if (!verified) logger?.(`verification simply failed, label: ${label}`);
 			if (verified) break;
 		}
+		if (!eligible) continue;
+		eligibleSignatures++;
 		if (verifyAll && !verified) return false;
 		if (!verifyAll && verified) return true;
 	}
-	return verifyAll;
+	return verifyAll && eligibleSignatures > 0;
 }

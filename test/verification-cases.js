@@ -1,5 +1,7 @@
 // Shared native-Web-Crypto regressions for Jest, Chrome main thread and workers.
 export const verificationCaseNames = [
+  'implicit JWK operations preserve declared hashes',
+  'implicit algorithm allowlist is respected',
   'P-256 PEM and CryptoKey', 'P-384 PEM and CryptoKey', 'label and keyid selection',
   'same-algorithm fallback examines every PEM key', 'same-algorithm fallback examines every CryptoKey',
   'mixed and malformed fallback candidates', 'wrong curve and algorithm are rejected',
@@ -26,7 +28,7 @@ export async function createVerificationCases(api, crypto) {
   for (const [name, pair] of Object.entries({ ...pairs, wrong, rsa })) pem[name] = await api.exportPublicKeyPem(pair.publicKey);
 
   async function entry(pair, algorithm, hash, keyid, label = 'sig') {
-    const params = `("@method");alg="${algorithm}"${keyid === undefined ? '' : `;keyid="${keyid}"`}`;
+    const params = `("@method")${algorithm === undefined ? '' : `;alg="${algorithm}"`}${keyid === undefined ? '' : `;keyid="${keyid}"`}`;
     const base = `"@method": POST\n"@signature-params": ${params}`;
     // Sign independently of the library's algorithm/default selection.
     const bytes = await crypto.subtle.sign({ name: pair.privateKey.algorithm.name, hash }, pair.privateKey, new TextEncoder().encode(base));
@@ -191,6 +193,60 @@ export async function createVerificationCases(api, crypto) {
     let threw = false;
     try { await api.verifyRFC9421Signature(parsed.value, { resolveKey, verifier: async () => { throw new Error('backend error'); } }); } catch { threw = true; }
     assert(threw, 'Verifier exception was swallowed');
+  };
+  cases['implicit algorithm allowlist is respected'] = async () => {
+    const implicit = await entry(rsa, undefined, 'SHA-256', 'actor-rsa', 'implicit');
+    for (const verifyAll of [false, true]) {
+      for (const key of [pem.rsa, new Map([['actor-rsa', rsa.publicKey]])]) {
+        await check([implicit], key, false, { verifyAll, algorithms: ['ed25519'] });
+        await check([implicit], key, true, { verifyAll, algorithms: ['rsa-v1_5-sha256'] });
+      }
+    }
+    const selected = ['selected', p256[1]];
+    const keys = new Map([['actor-rsa', pem.rsa], ['selected', pem['P-256']]]);
+    await check([implicit, selected], keys, true, { verifyAll: true, algorithms: ['ecdsa-p256-sha256'] });
+    await check([implicit], new Map([['actor-rsa', pem.rsa]]), false, { verifyAll: true, algorithms: ['ed25519'] });
+  };
+  cases['implicit JWK operations preserve declared hashes'] = async () => {
+    const pair = pairs['P-384'];
+    const jwk = { ...await crypto.subtle.exportKey('jwk', pair.publicKey), alg: 'ES384' };
+    const implicit = await entry(pair, undefined, 'SHA-384', 'ec-jwk');
+    await check([implicit], jwk, true);
+    await check([await entry(pair, undefined, 'SHA-256', 'ec-jwk')], jwk, false);
+    let calls = 0;
+    assert(await api.verifyRFC9421Signature([implicit], { keys: jwk, verifier: async context => {
+      calls++;
+      assert(context.algorithm.hash === 'SHA-384' && context.signatureAlgorithm === 'ecdsa-p384-sha384', 'JWK context lost declared hash');
+      return api.webCryptoVerifier(context);
+    } }), 'JWK custom verifier failed');
+    assert(calls === 1, 'Expected one verifier call');
+    calls = 0;
+    for (const verifyAll of [false, true]) {
+      assert(!await api.verifyRFC9421Signature([implicit], { keys: jwk, verifyAll, algorithms: ['ed25519'], verifier: async () => { calls++; return true; } }), 'Disallowed implicit JWK accepted');
+    }
+    assert(calls === 0, 'Disallowed algorithm reached custom verifier');
+    const selected = ['selected', p256[1]];
+    for (const missing of [undefined, 'malformed']) {
+      assert(!await api.verifyRFC9421Signature([implicit, selected], { keys: new Map([['ec-jwk', missing], ['selected', pairs['P-256'].publicKey]]), verifyAll: true }), 'Missing or malformed identified key must fail verifyAll');
+    }
+    for (const [hash, alg] of [['SHA-384', 'RS384'], ['SHA-512', 'RS512'], ['SHA-384', 'ES384']]) {
+      const signing = alg.startsWith('RS') ? await crypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', hash, modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]) }, true, ['sign', 'verify']) : pair;
+      const publicJwk = { ...await crypto.subtle.exportKey('jwk', signing.publicKey), alg };
+      const signingString = '(request-target): post /inbox?q=1\nhost: example.com';
+      for (const usedHash of [hash, 'SHA-256']) {
+        const signature = new Uint8Array(await crypto.subtle.sign({ name: signing.privateKey.algorithm.name, hash: usedHash }, signing.privateKey, new TextEncoder().encode(signingString)));
+        // RSA CryptoKeys bind their hash, so use a separately imported SHA-256 key for the negative signature.
+        let bytes = signature;
+        if (alg.startsWith('RS') && usedHash !== hash) {
+          const privateJwk = await crypto.subtle.exportKey('jwk', signing.privateKey);
+          delete privateJwk.alg;
+          const wrong = await crypto.subtle.importKey('jwk', privateJwk, { name: 'RSASSA-PKCS1-v1_5', hash: usedHash }, false, ['sign']);
+          bytes = new Uint8Array(await crypto.subtle.sign({ name: 'RSASSA-PKCS1-v1_5' }, wrong, new TextEncoder().encode(signingString)));
+        }
+        const parsed = { signingString, keyId: 'jwk', params: { signature: btoa(String.fromCharCode(...bytes)) } };
+        assert(await api.verifyDraftSignature(parsed, publicJwk) === (usedHash === hash), 'Draft implicit JWK hash mismatch: ' + alg);
+      }
+    }
   };
   return cases;
 }

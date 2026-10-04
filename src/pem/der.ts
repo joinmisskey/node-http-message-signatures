@@ -21,6 +21,7 @@ export function derChildren(data: Uint8Array): DerElement[] {
 	const children: DerElement[] = [];
 	for (let offset = 0; offset < data.length;) {
 		const child = readDer(data, offset);
+		if (children.length >= 64) throw new Error('Too many DER fields');
 		children.push(child);
 		offset = child.end;
 	}

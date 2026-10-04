@@ -36,6 +36,17 @@ export function operationWithoutKey(version: 'draft' | 'rfc9421', wire: string):
 	if (wire.startsWith('rsa-')) return parseSignInfo(wire, { name: 'RSASSA-PKCS1-v1_5' }) as SignatureOperation;
 	throw new Error('Keyless verification requires an unambiguous signature algorithm');
 }
+/** Normalize the already validated import operation, preserving JWK hash metadata. */
+export function operationFromImport(imported: Awaited<ReturnType<typeof import('../pem/spki.js').parseAndImportPublicKey>>): SignatureOperation {
+	const raw = imported.algorithm;
+	const rawHash = ('hash' in raw ? raw.hash : null) as string | { name: string } | null;
+	const hash = typeof rawHash === 'object' && rawHash !== null ? rawHash.name : rawHash;
+	if (raw.name === 'Ed25519' || raw.name === 'Ed448') return { name: raw.name };
+	if (raw.name === 'RSASSA-PKCS1-v1_5') return { name: raw.name, hash } as SignatureOperation;
+	if (raw.name === 'RSA-PSS') return { name: raw.name, hash, saltLength: 64 } as SignatureOperation;
+	if (raw.name === 'ECDSA') return { name: raw.name, hash, namedCurve: (imported.publicKey.algorithm as EcKeyAlgorithm).namedCurve } as SignatureOperation;
+	throw new Error('Unsupported imported signature operation');
+}
 export function validateOperationKey(key: CryptoKey, operation: SignatureOperation, usage: 'sign' | 'verify') {
 	if (key.type !== (usage === 'sign' ? 'private' : 'public') || !key.usages.includes(usage) || key.algorithm.name !== operation.name) throw new Error('CryptoKey is incompatible with signature operation');
 	if ('hash' in key.algorithm && (!('hash' in operation) || (key.algorithm as RsaHashedKeyAlgorithm).hash.name !== operation.hash)) throw new Error('CryptoKey hash conflicts with signature operation');

@@ -189,3 +189,4 @@ const valid = await verifyParsedSignature(parsed, {
 ```
 
 `verifyParsedSignature` verifies the supplied parsed cryptographic base. Time and required-component checks remain in parsing; body digest validation remains a separate call. Hooks do not add or bypass those checks. Keyless verification requires a declared wire algorithm with unambiguous operation parameters (RFC supported algorithms, draft RSA/Ed25519/Ed448); draft ECDSA needs a resolved key for its curve. Algorithm allowlists and all-versus-any behavior remain in RFC verification.
+PEM/hex/base64 key strings are limited to 4 MiB before decoding; decoded and binary key inputs are limited to 1 MiB before generic ASN.1 parsing. These limits preserve normal PEM whitespace and typical key sizes. The strict DER reader for new key containers limits each field list to 64 entries; supported structures have at most nine.
