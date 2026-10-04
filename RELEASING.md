@@ -46,7 +46,9 @@ npm view @misskey-dev/node-http-message-signatures versions dist-tags --json
 At preparation time (2026-10-04), registry `latest` is `0.0.10`. The source main
 commit `308c1e1630b77ef1c961e52e1af05a0e9df5e6d2` and source Git tag
 `1.0.0-beta.1` both have package version `0.0.10`. A GitHub tag/release name does
-not establish an npm package version. This fix intentionally does not bump it.
+not establish an npm package version. The query-fix PR left that version unchanged.
+After merging it, release preparation selects the next unused patch, `0.0.11`;
+this is prepared in the fork only and has not been published to npm.
 
 A maintainer must choose an unused version and explicitly approve the dist-tag
 (`latest` for a stable release or an agreed prerelease tag such as `beta`). npm
