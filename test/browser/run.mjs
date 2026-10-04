@@ -28,15 +28,18 @@ const server = createServer((request, response) => {
 try {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${server.address().port}/`;
-  chrome = spawn(process.env.CHROME_BIN || 'google-chrome', ['--headless', '--no-sandbox', '--disable-gpu', '--remote-debugging-port=0', `--user-data-dir=${profile}`, url], { stdio: 'ignore' });
+  chrome = spawn(process.env.CHROME_BIN || 'google-chrome', ['--headless', '--no-sandbox', '--disable-gpu', '--remote-debugging-port=0', `--user-data-dir=${profile}`, url], { stdio: ['ignore', 'ignore', 'pipe'] });
+  let startupLog = '';
+  chrome.stderr.on('data', chunk => { startupLog = (startupLog + chunk.toString()).slice(-4096); });
   let launchError;
   chrome.on('error', error => { launchError = error; });
   let port;
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 300; i++) {
     if (launchError) throw launchError;
+    if (chrome.exitCode !== null || chrome.signalCode !== null) throw new Error(`Chrome exited during startup: ${startupLog}`);
     try { port = (await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]; break; } catch { await delay(100); }
   }
-  if (!port) throw new Error('Chrome did not start; set CHROME_BIN to the Chrome executable');
+  if (!port) throw new Error(`Chrome did not start within 30 seconds; set CHROME_BIN to the Chrome executable. ${startupLog}`);
   const tabs = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
   const tab = tabs.find(item => item.type === 'page' && item.url === url);
   if (!tab) throw new Error('Chrome test tab not found');
