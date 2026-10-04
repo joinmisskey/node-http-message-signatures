@@ -71,8 +71,11 @@ It is retained unchanged; do not create a release or dispatch it during review.
 
 GitHub's Actions permissions API reported `enabled: true` for this fork on
 2026-10-04; this task did not enable Actions or modify any grants. Recheck that
-state before a release. Fork credentials/trusted publisher authorization are not
-assumed to exist and have not been inspected or configured.
+state before a release. The workflow listing returned no registered workflows,
+and there were no workflow runs or PR checks after this branch was pushed; the
+permissions setting alone does not establish that fork workflows will run. Fork
+credentials/trusted publisher authorization are not assumed to exist and have
+not been inspected or configured.
 
 For a later CI release, a maintainer must review the publishing workflow and
 authorize its exact repository/workflow/environment and authentication method.
