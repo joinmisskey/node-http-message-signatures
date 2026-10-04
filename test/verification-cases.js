@@ -9,6 +9,7 @@ export const verificationCaseNames = [
   'missing algorithm requires an identified key', 'custom SFV parsing and verification',
   'native Fetch Request signing and verification', 'pre-imported RSA keys enforce algorithm and hash',
   'RSA-PSS SHA-512 uses exactly 64 salt bytes',
+  'implicit algorithm allowlist is respected',
 ];
 
 function assert(value, message) {
@@ -26,7 +27,7 @@ export async function createVerificationCases(api, crypto) {
   for (const [name, pair] of Object.entries({ ...pairs, wrong, rsa })) pem[name] = await api.exportPublicKeyPem(pair.publicKey);
 
   async function entry(pair, algorithm, hash, keyid, label = 'sig') {
-    const params = `("@method");alg="${algorithm}"${keyid === undefined ? '' : `;keyid="${keyid}"`}`;
+    const params = `("@method")${algorithm === undefined ? '' : `;alg="${algorithm}"`}${keyid === undefined ? '' : `;keyid="${keyid}"`}`;
     const base = `"@method": POST\n"@signature-params": ${params}`;
     // Sign independently of the library's algorithm/default selection.
     const bytes = await crypto.subtle.sign({ name: pair.privateKey.algorithm.name, hash }, pair.privateKey, new TextEncoder().encode(base));
@@ -149,6 +150,19 @@ export async function createVerificationCases(api, crypto) {
       const bad = [['pss', { ...parsed.value[0][1], signature: btoa(String.fromCharCode(...signature)) }]];
       assert(!await api.verifyRFC9421Signature(bad, pair.publicKey), 'Wrong PSS salt accepted');
     }
+  };
+  cases['implicit algorithm allowlist is respected'] = async () => {
+    const implicit = await entry(rsa, undefined, 'SHA-256', 'actor-rsa', 'implicit');
+    for (const verifyAll of [false, true]) {
+      for (const key of [pem.rsa, new Map([['actor-rsa', rsa.publicKey]])]) {
+        await check([implicit], key, false, { verifyAll, algorithms: ['ed25519'] });
+        await check([implicit], key, true, { verifyAll, algorithms: ['rsa-v1_5-sha256'] });
+      }
+    }
+    const selected = ['selected', p256[1]];
+    const keys = new Map([['actor-rsa', pem.rsa], ['selected', pem['P-256']]]);
+    await check([implicit, selected], keys, true, { verifyAll: true, algorithms: ['ecdsa-p256-sha256'] });
+    await check([implicit], new Map([['actor-rsa', pem.rsa]]), false, { verifyAll: true, algorithms: ['ed25519'] });
   };
   return cases;
 }
