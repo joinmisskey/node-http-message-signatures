@@ -660,6 +660,7 @@ __export(src_exports, {
   genSpkiFromPkcs1: () => genSpkiFromPkcs1,
   getDraftAlgoString: () => getDraftAlgoString,
   getHeaderValue: () => getHeaderValue,
+  getJwkSigningDefaults: () => getJwkSigningDefaults,
   getMap: () => getMap,
   getMapWithoutUndefined: () => getMapWithoutUndefined,
   getNistCurveFromOid: () => getNistCurveFromOid,
@@ -1191,6 +1192,22 @@ async function importPublicJwk(jwk, keyUsages = ["verify"], defaults = defaultSi
 }
 async function importPrivateJwk(jwk, keyUsages = ["sign"], defaults = defaultSignInfoDefaults, extractable = false) {
   return (await importSignatureJwk(jwk, true, keyUsages, defaults, extractable)).key;
+}
+function getJwkSigningDefaults(jwk, defaults) {
+  const operation = operationForJwk(jwk, void 0, defaults ?? defaultSignInfoDefaults);
+  if (jwk.alg !== void 0 && defaults) {
+    if ("hash" in operation && defaults.hash !== operation.hash)
+      throw new Error("Signing defaults conflict with JWK alg hash");
+    if (operation.name === "ECDSA" && defaults.ec !== "DSA")
+      throw new Error("Signing defaults conflict with JWK signature usage");
+    if ((operation.name === "RSA-PSS" || operation.name === "RSASSA-PKCS1-v1_5") && defaults.rsa && defaults.rsa !== operation.name)
+      throw new Error("Signing defaults conflict with JWK RSA mode");
+  }
+  return {
+    ...defaults ?? defaultSignInfoDefaults,
+    hash: "hash" in operation ? operation.hash : defaults?.hash ?? defaultSignInfoDefaults.hash,
+    ...operation.name === "RSA-PSS" ? { rsa: "RSA-PSS" } : {}
+  };
 }
 
 // src/pem/pss.ts
@@ -2805,7 +2822,8 @@ var genDraftSignature = genSignature;
 function genDraftSignatureHeader(includeHeaders, keyId, signature, algorithm) {
   return `keyId="${keyId}",algorithm="${algorithm}",headers="${includeHeaders.join(" ")}",signature="${signature}"`;
 }
-async function signAsDraftToRequest(request, key, includeHeaders, opts = defaultSignInfoDefaults) {
+async function signAsDraftToRequest(request, key, includeHeaders, opts) {
+  opts = "privateKeyJwk" in key ? getJwkSigningDefaults(key.privateKeyJwk, opts) : opts ?? defaultSignInfoDefaults;
   if (opts.hashAlgorithm) {
     opts.hash = opts.hashAlgorithm;
   }
@@ -2857,7 +2875,7 @@ function getRFC9421AlgoString(keyAlgorithm, hashAlgorithm) {
   throw new Error(`unsupported keyAlgorithm(${JSON.stringify(keyAlgorithm)}) or hash(${hashAlgorithm})`);
 }
 async function processSingleRFC9421SignSource(source) {
-  const defaults = source.defaults ?? defaultSignInfoDefaults;
+  const defaults = "privateKeyJwk" in source.key ? getJwkSigningDefaults(source.key.privateKeyJwk, source.defaults) : source.defaults ?? defaultSignInfoDefaults;
   const privateKey = "privateKey" in source.key ? source.key.privateKey : await importPrivateKey("privateKeyJwk" in source.key ? source.key.privateKeyJwk : source.key.privateKeyPem, ["sign"], defaults);
   const alg = getRFC9421AlgoString(privateKey.algorithm, defaults.hash);
   const created = source.created ?? Math.round(Date.now() / 1e3);
@@ -2883,9 +2901,11 @@ async function signAsRFC9421ToRequestOrResponse(request, sources, signatureBaseO
 }) {
   const sourcesMap = getMap(sources);
   const keys = /* @__PURE__ */ new Map();
+  const signingDefaults = /* @__PURE__ */ new Map();
   const inputDictionary = /* @__PURE__ */ new Map();
   for (const [label, source] of sourcesMap) {
     const { key, params } = await processSingleRFC9421SignSource(source);
+    signingDefaults.set(label, "privateKeyJwk" in source.key ? getJwkSigningDefaults(source.key.privateKeyJwk, source.defaults) : source.defaults ?? defaultSignInfoDefaults);
     keys.set(label, key);
     inputDictionary.set(label, params);
   }
@@ -2910,7 +2930,7 @@ async function signAsRFC9421ToRequestOrResponse(request, sources, signatureBaseO
     signatureBases.set(label, base);
     signatureDictionary.set(label, [
       new sh4.ByteSequence(
-        await genSignature(key, base, sourcesMap.get(label)?.defaults ?? defaultSignInfoDefaults)
+        await genSignature(key, base, signingDefaults.get(label) ?? defaultSignInfoDefaults)
       ),
       /* @__PURE__ */ new Map()
     ]);
@@ -2982,6 +3002,7 @@ async function signAsRFC9421ToRequestOrResponse(request, sources, signatureBaseO
   genSpkiFromPkcs1,
   getDraftAlgoString,
   getHeaderValue,
+  getJwkSigningDefaults,
   getMap,
   getMapWithoutUndefined,
   getNistCurveFromOid,

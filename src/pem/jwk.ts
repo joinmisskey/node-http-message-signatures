@@ -56,3 +56,18 @@ export async function importPublicJwk(jwk: JsonWebKey, keyUsages: KeyUsage[] = [
 export async function importPrivateJwk(jwk: JsonWebKey, keyUsages: KeyUsage[] = ['sign'], defaults: SignInfoDefaults = defaultSignInfoDefaults, extractable = false): Promise<CryptoKey> {
 	return (await importSignatureJwk(jwk, true, keyUsages, defaults, extractable)).key;
 }
+
+/** Declared JWK algorithms determine omitted signing defaults; explicit conflicts fail. */
+export function getJwkSigningDefaults(jwk: JsonWebKey, defaults?: SignInfoDefaults): SignInfoDefaults {
+	const operation = operationForJwk(jwk, undefined, defaults ?? defaultSignInfoDefaults);
+	if (jwk.alg !== undefined && defaults) {
+		if ('hash' in operation && defaults.hash !== operation.hash) throw new Error('Signing defaults conflict with JWK alg hash');
+		if (operation.name === 'ECDSA' && defaults.ec !== 'DSA') throw new Error('Signing defaults conflict with JWK signature usage');
+		if ((operation.name === 'RSA-PSS' || operation.name === 'RSASSA-PKCS1-v1_5') && defaults.rsa && defaults.rsa !== operation.name) throw new Error('Signing defaults conflict with JWK RSA mode');
+	}
+	return {
+		...(defaults ?? defaultSignInfoDefaults),
+		hash: 'hash' in operation ? operation.hash : defaults?.hash ?? defaultSignInfoDefaults.hash,
+		...(operation.name === 'RSA-PSS' ? { rsa: 'RSA-PSS' as const } : {}),
+	};
+}

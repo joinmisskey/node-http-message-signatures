@@ -1,5 +1,6 @@
 import type { IncomingRequest, MapLikeObj, OutgoingResponse, PrivateKey, SFVSignatureParamsForInput, SignatureHashAlgorithmUpperSnake } from '../types.js';
 import { type SignInfoDefaults, defaultSignInfoDefaults, setHeaderToRequestOrResponse, getMap } from '../utils.js';
+import { getJwkSigningDefaults } from '../pem/jwk.js';
 import { importPrivateKey } from '../pem/pkcs8.js';
 import { RFC9421SignatureBaseFactory, convertSignatureParamsDictionary } from './base.js';
 import { SFVHeaderTypeDictionary } from './sfv.js';
@@ -79,7 +80,7 @@ export function getRFC9421AlgoString(keyAlgorithm: CryptoKey['algorithm'], hashA
 }
 
 export async function processSingleRFC9421SignSource(source: RFC9421SignSource) {
-	const defaults = source.defaults ?? defaultSignInfoDefaults;
+	const defaults = 'privateKeyJwk' in source.key ? getJwkSigningDefaults(source.key.privateKeyJwk, source.defaults) : source.defaults ?? defaultSignInfoDefaults;
 	const privateKey = 'privateKey' in source.key ?
 		source.key.privateKey
 		: await importPrivateKey(('privateKeyJwk' in source.key ? source.key.privateKeyJwk : source.key.privateKeyPem), ['sign'], defaults);
@@ -126,9 +127,11 @@ export async function signAsRFC9421ToRequestOrResponse(
 ) {
 	const sourcesMap = getMap(sources) as Map<string, RFC9421SignSource>;
 	const keys = new Map<string, CryptoKey>();
+	const signingDefaults = new Map<string, SignInfoDefaults>();
 	const inputDictionary = new Map<string, SFVSignatureParamsForInput>();
 	for (const [label, source] of sourcesMap) {
 		const { key, params } = await processSingleRFC9421SignSource(source);
+		signingDefaults.set(label, 'privateKeyJwk' in source.key ? getJwkSigningDefaults(source.key.privateKeyJwk, source.defaults) : source.defaults ?? defaultSignInfoDefaults);
 		keys.set(label, key);
 		inputDictionary.set(label, params);
 	}
@@ -155,7 +158,7 @@ export async function signAsRFC9421ToRequestOrResponse(
 		signatureBases.set(label, base);
 		signatureDictionary.set(label, [
 			new sh.ByteSequence(
-				await genSignature(key, base, sourcesMap.get(label)?.defaults ?? defaultSignInfoDefaults)
+				await genSignature(key, base, signingDefaults.get(label) ?? defaultSignInfoDefaults)
 			),
 			new Map(),
 		]);
