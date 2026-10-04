@@ -192,3 +192,8 @@ const valid = await verifyParsedSignature(parsed, {
 
 `verifyParsedSignature` verifies the supplied parsed cryptographic base. Time and required-component checks remain in parsing; body digest validation remains a separate call. Hooks do not add or bypass those checks. Keyless verification requires a declared wire algorithm with unambiguous operation parameters (RFC supported algorithms, draft RSA/Ed25519/Ed448); draft ECDSA needs a resolved key for its curve. Algorithm allowlists and all-versus-any behavior remain in RFC verification.
 PEM/hex/base64 key strings are limited to 4 MiB before decoding; decoded and binary key inputs are limited to 1 MiB before generic ASN.1 parsing. These limits preserve normal PEM whitespace and typical key sizes. The strict DER reader for new key containers limits each field list to 64 entries; supported structures have at most nine.
+
+
+## Building from source
+
+Generated `dist/` is not tracked in Git. Run `pnpm install --frozen-lockfile` and `pnpm build` before built-file tests or local use. Normal `npm pack`/`pnpm pack` regenerates the ESM/CommonJS files and type declarations through `prepack`; published packages include them. There is no install-time `prepare` hook. Use the npm package or a locally built tarball instead of treating a Git checkout as a prebuilt dependency. See [RELEASING.md](./RELEASING.md) for clean-checkout validation and staged publishing.
