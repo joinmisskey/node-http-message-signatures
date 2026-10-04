@@ -1,6 +1,5 @@
-import { ParsedRFC9421Signature, ParsedRFC9421SignatureValueWithBase, RFC9421SignatureAlgorithm } from "../types.js";
+import { ParsedRFC9421Signature, RFC9421SignatureAlgorithm } from "../types.js";
 import { parseAndImportPublicKey } from "../pem/spki.js";
-import { parseSignInfo } from "../shared/verify.js";
 import { getWebcrypto } from "../utils.js";
 import { base64 } from "rfc4648";
 import { textEncoder } from "../const.js";
@@ -8,12 +7,13 @@ import { textEncoder } from "../const.js";
 const algorithmsDefault = ['ed25519', 'rsa-pss-sha512', 'ecdsa-p384-sha384', 'ecdsa-p256-sha256', 'hmac-sha256', 'rsa-v1_5-sha256'] satisfies RFC9421SignatureAlgorithm[];
 
 /**
- * Verify a draft signature
+ * Verify RFC 9421 signatures
  * All provided algorithms are verified. If you want to limit the algorithms, use options when parsing the signature.
  * @param parsedEntries ParsedRFC9421Signature['value'] (`[label, (obj)][]`)
  * @param keys a public key or Map of public keys
  * 		* If you want to verify multiple signatures, you need to use Map as the keys
- * 		* You can use keyid and label as the key of the Map
+ * 		* You can use keyid and label as the key of the Map (label takes precedence).
+ * 		* Algorithm-only fallback is available only when no keyid or mapped label selects a key.
  * @param options: Options for multiple signatures verification
  * @param errorLogger: If you want to log errors, set function
  */
@@ -46,70 +46,10 @@ export async function verifyRFC9421Signature(
 	const algorithms = options?.algorithms?.map(x => x.toLowerCase()) ?? algorithmsDefault;
 	if (algorithms.length === 0) throw new Error('algorithms is empty');
 
-	const toVerify = [] as [string, ParsedRFC9421SignatureValueWithBase, string | CryptoKey, string | undefined][];
-	let importedKeys: Awaited<ReturnType<typeof parseAndImportPublicKey>>[] = [];
-
-	for (const [label, parsed] of parsedEntries) {
+	const toVerify = parsedEntries.filter(([, parsed]) => {
 		const alg = parsed.algorithm?.toLowerCase();
-		if (alg && !algorithms.includes(alg as RFC9421SignatureAlgorithm)) {
-			continue;
-		}
-
-		if (!(keys instanceof Map)) {
-			toVerify.push([label, parsed, keys, alg]);
-			continue;
-		}
-
-		//#region Find key by label or keyid
-		const keyByName = keys instanceof Map ?
-			(keys.get(label) ?? (parsed.keyid && keys.get(parsed.keyid)))
-			: keys;
-		if (keyByName) {
-			toVerify.push([label, parsed, keyByName, alg]);
-			continue;
-		}
-		//#endregion
-
-		if (parsed.keyid && options.verifyAll === true) {
-			// verifyAllの場合、keyidで見つからないときはエラーにする
-			// If verifyAll is true, an error will be thrown if the keyid is not found.
-			if (errorLogger) errorLogger(`key not found in provided keys (verifyAll: true), label: ${label} keyid: ${parsed.keyid}`);
-			return false;
-		}
-
-		//#region Find key by algorithm
-		if (!alg) {
-			if (errorLogger) errorLogger(`key not found by label or keyid, but algorithm also not found. label: ${label}`);
-			return false;
-		}
-
-		if (importedKeys.length === 0) {
-			importedKeys = await Promise.all(
-				Array.from(keys.values())
-					.map(key => parseAndImportPublicKey(key, ['verify']))
-			);
-		}
-
-		const keyByAlgorithm = importedKeys.find(({ algorithm }) => {
-			try {
-				parseSignInfo(alg, algorithm);
-				return true;
-			} catch (e) {
-				return false;
-			}
-		});
-
-		if (keyByAlgorithm) {
-			toVerify.push([label, parsed, keyByAlgorithm.publicKey, alg]);
-			continue;
-		}
-
-		if (options.verifyAll === true) {
-			if (errorLogger) errorLogger(`key not found, label: ${label}, keyid: ${parsed.keyid}`);
-			return false;
-		}
-		//#endregion
-	}
+		return !alg || algorithms.includes(alg as RFC9421SignatureAlgorithm);
+	});
 
 	if (toVerify.length === 0) {
 		if (errorLogger) errorLogger('No matched signature found');
@@ -117,43 +57,52 @@ export async function verifyRFC9421Signature(
 	}
 
 	if (options.verifyAll === false) {
-		// Sort by algorithm
-		toVerify.sort((a, b) => {
-			const algA = a[3]?.toLowerCase() ?? '';
-			const algB = b[3]?.toLowerCase() ?? '';
-			return algorithms.indexOf(algA as RFC9421SignatureAlgorithm) - algorithms.indexOf(algB as RFC9421SignatureAlgorithm);
-		});
+		toVerify.sort(([, a], [, b]) =>
+			algorithms.indexOf(a.algorithm?.toLowerCase() as RFC9421SignatureAlgorithm) -
+			algorithms.indexOf(b.algorithm?.toLowerCase() as RFC9421SignatureAlgorithm)
+		);
 	}
 
-	for (const [label, parsed, key] of toVerify) {
-		try {
-			const { publicKey, algorithm } = await parseAndImportPublicKey(key, ['verify']);
+	for (const [label, parsed] of toVerify) {
+		const alg = parsed.algorithm?.toLowerCase();
+		let candidates: (string | CryptoKey)[];
+		if (!(keys instanceof Map)) {
+			candidates = [keys];
+		} else if (keys.has(label)) {
+			candidates = [keys.get(label)!];
+		} else if (parsed.keyid !== undefined) {
+			// An explicit identity must never fall back to unrelated keys.
+			candidates = keys.has(parsed.keyid) ? [keys.get(parsed.keyid)!] : [];
+		} else {
+			candidates = alg ? Array.from(keys.values()) : [];
+		}
 
-			const verify = await (await getWebcrypto()).subtle.verify(
-				algorithm, publicKey, base64.parse(parsed.signature), textEncoder.encode(parsed.base)
-			);
-
-			if (options.verifyAll === true) {
-				if (verify === true) continue;
-				if (verify === false) {
-					if (errorLogger) errorLogger(`verification simply failed, label: ${label}`);
-					return false;
+		let verified = false;
+		for (const candidate of candidates) {
+			try {
+				// Import per signature and algorithm; defaults or another signature's
+				// imported key must not determine the hash/curve used here.
+				const { publicKey, algorithm } = await parseAndImportPublicKey(candidate, ['verify'], alg);
+				const result = await (await getWebcrypto()).subtle.verify(
+					algorithm, publicKey, base64.parse(parsed.signature), textEncoder.encode(parsed.base)
+				);
+				if (result === true) {
+					verified = true;
+					break;
 				}
-			} else {
-				if (verify === true) return true;
-				if (verify === false) {
-					if (errorLogger) errorLogger(`verification simply failed, label: ${label}`);
-					continue;
-				}
+				if (errorLogger) errorLogger(`verification simply failed, label: ${label}`);
+			} catch (e) {
+				// A malformed/incompatible candidate does not invalidate alternatives.
+				if (errorLogger) errorLogger(`Something happened in ${label}: ${e}`);
 			}
-			if (typeof verify !== 'boolean') throw new Error(verify); // unknown result
-		} catch (e) {
-			if (errorLogger) errorLogger(`Something happend in ${label}: ${e}`);
+		}
+
+		if (options.verifyAll === true && !verified) {
+			if (candidates.length === 0 && errorLogger) errorLogger(`key not found, label: ${label}, keyid: ${parsed.keyid}`);
 			return false;
 		}
+		if (options.verifyAll === false && verified) return true;
 	}
 
-	// If verifyAll is true, all signatures have been verified
-	// If verifyAll is false, no signature has been verified
-	return options.verifyAll === true ? true : false;
+	return options.verifyAll === true;
 }

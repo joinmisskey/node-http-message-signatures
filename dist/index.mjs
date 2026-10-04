@@ -725,102 +725,62 @@ async function verifyRFC9421Signature(parsedEntries, keys, options = {
   const algorithms = options?.algorithms?.map((x) => x.toLowerCase()) ?? algorithmsDefault;
   if (algorithms.length === 0)
     throw new Error("algorithms is empty");
-  const toVerify = [];
-  let importedKeys = [];
-  for (const [label, parsed] of parsedEntries) {
+  const toVerify = parsedEntries.filter(([, parsed]) => {
     const alg = parsed.algorithm?.toLowerCase();
-    if (alg && !algorithms.includes(alg)) {
-      continue;
-    }
-    if (!(keys instanceof Map)) {
-      toVerify.push([label, parsed, keys, alg]);
-      continue;
-    }
-    const keyByName = keys instanceof Map ? keys.get(label) ?? (parsed.keyid && keys.get(parsed.keyid)) : keys;
-    if (keyByName) {
-      toVerify.push([label, parsed, keyByName, alg]);
-      continue;
-    }
-    if (parsed.keyid && options.verifyAll === true) {
-      if (errorLogger)
-        errorLogger(`key not found in provided keys (verifyAll: true), label: ${label} keyid: ${parsed.keyid}`);
-      return false;
-    }
-    if (!alg) {
-      if (errorLogger)
-        errorLogger(`key not found by label or keyid, but algorithm also not found. label: ${label}`);
-      return false;
-    }
-    if (importedKeys.length === 0) {
-      importedKeys = await Promise.all(
-        Array.from(keys.values()).map((key) => parseAndImportPublicKey(key, ["verify"]))
-      );
-    }
-    const keyByAlgorithm = importedKeys.find(({ algorithm }) => {
-      try {
-        parseSignInfo(alg, algorithm);
-        return true;
-      } catch (e) {
-        return false;
-      }
-    });
-    if (keyByAlgorithm) {
-      toVerify.push([label, parsed, keyByAlgorithm.publicKey, alg]);
-      continue;
-    }
-    if (options.verifyAll === true) {
-      if (errorLogger)
-        errorLogger(`key not found, label: ${label}, keyid: ${parsed.keyid}`);
-      return false;
-    }
-  }
+    return !alg || algorithms.includes(alg);
+  });
   if (toVerify.length === 0) {
     if (errorLogger)
       errorLogger("No matched signature found");
     return false;
   }
   if (options.verifyAll === false) {
-    toVerify.sort((a, b) => {
-      const algA = a[3]?.toLowerCase() ?? "";
-      const algB = b[3]?.toLowerCase() ?? "";
-      return algorithms.indexOf(algA) - algorithms.indexOf(algB);
-    });
+    toVerify.sort(
+      ([, a], [, b]) => algorithms.indexOf(a.algorithm?.toLowerCase()) - algorithms.indexOf(b.algorithm?.toLowerCase())
+    );
   }
-  for (const [label, parsed, key] of toVerify) {
-    try {
-      const { publicKey, algorithm } = await parseAndImportPublicKey(key, ["verify"]);
-      const verify = await (await getWebcrypto()).subtle.verify(
-        algorithm,
-        publicKey,
-        base642.parse(parsed.signature),
-        textEncoder.encode(parsed.base)
-      );
-      if (options.verifyAll === true) {
-        if (verify === true)
-          continue;
-        if (verify === false) {
-          if (errorLogger)
-            errorLogger(`verification simply failed, label: ${label}`);
-          return false;
+  for (const [label, parsed] of toVerify) {
+    const alg = parsed.algorithm?.toLowerCase();
+    let candidates;
+    if (!(keys instanceof Map)) {
+      candidates = [keys];
+    } else if (keys.has(label)) {
+      candidates = [keys.get(label)];
+    } else if (parsed.keyid !== void 0) {
+      candidates = keys.has(parsed.keyid) ? [keys.get(parsed.keyid)] : [];
+    } else {
+      candidates = alg ? Array.from(keys.values()) : [];
+    }
+    let verified = false;
+    for (const candidate of candidates) {
+      try {
+        const { publicKey, algorithm } = await parseAndImportPublicKey(candidate, ["verify"], alg);
+        const result = await (await getWebcrypto()).subtle.verify(
+          algorithm,
+          publicKey,
+          base642.parse(parsed.signature),
+          textEncoder.encode(parsed.base)
+        );
+        if (result === true) {
+          verified = true;
+          break;
         }
-      } else {
-        if (verify === true)
-          return true;
-        if (verify === false) {
-          if (errorLogger)
-            errorLogger(`verification simply failed, label: ${label}`);
-          continue;
-        }
+        if (errorLogger)
+          errorLogger(`verification simply failed, label: ${label}`);
+      } catch (e) {
+        if (errorLogger)
+          errorLogger(`Something happened in ${label}: ${e}`);
       }
-      if (typeof verify !== "boolean")
-        throw new Error(verify);
-    } catch (e) {
-      if (errorLogger)
-        errorLogger(`Something happend in ${label}: ${e}`);
+    }
+    if (options.verifyAll === true && !verified) {
+      if (candidates.length === 0 && errorLogger)
+        errorLogger(`key not found, label: ${label}, keyid: ${parsed.keyid}`);
       return false;
     }
+    if (options.verifyAll === false && verified)
+      return true;
   }
-  return options.verifyAll === true ? true : false;
+  return options.verifyAll === true;
 }
 
 // src/shared/verify.ts
@@ -862,7 +822,7 @@ function parseSignInfo(algorithm, real, errorLogger) {
     }
     throw new KeyHashValidationError(buildErrorMessage(algorithm, realKeyType));
   }
-  if (realKeyType === "EC") {
+  if (realKeyType === "EC" || realKeyType === "ECDSA") {
     const namedCurve = "parameter" in real ? getNistCurveFromOid(real.parameter) : real.namedCurve;
     if (!namedCurve)
       throw new KeyHashValidationError("could not get namedCurve");
@@ -880,7 +840,7 @@ function parseSignInfo(algorithm, real, errorLogger) {
       if (namedCurve !== "P-384") {
         throw new KeyHashValidationError(`curve is not P-384: ${namedCurve}`);
       }
-      return { name: "ECDSA", hash: "SHA-256", namedCurve };
+      return { name: "ECDSA", hash: "SHA-384", namedCurve };
     }
     const [dsaOrDH, hash] = algorithm.split("-");
     if (!hash || !(hash in keyHashAlgosForDraftDecoding)) {
@@ -1039,6 +999,12 @@ async function parseAndImportPublicKey(source, keyUsages = ["verify"], providedA
     };
   }
   const signInfo = parseSignInfo(providedAlgorithm, source.algorithm, errorLogger);
+  if (signInfo.name !== source.algorithm.name) {
+    throw new KeyHashValidationError("Provided algorithm does not match the imported CryptoKey");
+  }
+  if ("hash" in signInfo && "hash" in source.algorithm && source.algorithm.hash.name !== signInfo.hash) {
+    throw new KeyHashValidationError("Provided hash does not match the imported CryptoKey");
+  }
   return {
     publicKey: source,
     algorithm: genAlgorithmForSignAndVerify(source.algorithm, "hash" in signInfo ? signInfo.hash : null)
@@ -1668,7 +1634,7 @@ function parseRFC9421RequestOrResponse(request, options, validated, errorLogger)
   const factory = new RFC9421SignatureBaseFactory(
     request,
     void 0,
-    void 0,
+    options?.additionalSfvTypeDictionary,
     void 0,
     options?.requiredComponents?.rfc9421 || options?.requiredInputs?.rfc9421
   );

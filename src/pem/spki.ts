@@ -4,7 +4,7 @@ import { Base64 } from '@lapo/asn1js/base64.js';
 import { genSpkiFromPkcs1, parsePkcs1 } from './pkcs1.js';
 import { ECNamedCurve, KeyAlgorithmName } from '../types.js';
 import { SignInfoDefaults, defaultSignInfoDefaults, genAlgorithmForSignAndVerify, genSignInfo, getWebcrypto } from '../utils.js';
-import { parseSignInfo } from '../shared/verify.js';
+import { KeyHashValidationError, parseSignInfo } from '../shared/verify.js';
 
 export class SpkiParseError extends Error {
 	constructor(message: string) { super(message); }
@@ -238,6 +238,12 @@ export async function parseAndImportPublicKey(
 
 	// Is a CryptoKey
 	const signInfo = parseSignInfo(providedAlgorithm, source.algorithm, errorLogger);
+	if (signInfo.name !== source.algorithm.name) {
+		throw new KeyHashValidationError('Provided algorithm does not match the imported CryptoKey');
+	}
+	if ('hash' in signInfo && 'hash' in source.algorithm && (source.algorithm as RsaHashedKeyAlgorithm).hash.name !== signInfo.hash) {
+		throw new KeyHashValidationError('Provided hash does not match the imported CryptoKey');
+	}
 	return {
 		publicKey: source,
 		algorithm: genAlgorithmForSignAndVerify(source.algorithm, 'hash' in signInfo ? signInfo.hash : null),

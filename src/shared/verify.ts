@@ -66,7 +66,7 @@ export function parseSignInfo(algorithm: string | undefined, real: ParsedAlgorit
 		throw new KeyHashValidationError(buildErrorMessage(algorithm, realKeyType));
 	}
 
-	if (realKeyType === 'EC') {
+	if (realKeyType === 'EC' || realKeyType === 'ECDSA') {
 		const namedCurve = 'parameter' in real ? getNistCurveFromOid(real.parameter) : (real as EcKeyGenParams).namedCurve as ECNamedCurve;
 		if (!namedCurve) throw new KeyHashValidationError('could not get namedCurve');
 
@@ -87,7 +87,7 @@ export function parseSignInfo(algorithm: string | undefined, real: ParsedAlgorit
 			if (namedCurve !== 'P-384') {
 				throw new KeyHashValidationError(`curve is not P-384: ${namedCurve}`);
 			}
-			return { name: 'ECDSA', hash: 'SHA-256', namedCurve };
+			return { name: 'ECDSA', hash: 'SHA-384', namedCurve };
 		}
 
 		//#region Draft

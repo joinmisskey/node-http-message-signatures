@@ -52,25 +52,25 @@ Misskey added the `additionalPublicKeys` property to Actor to allow it to have m
   "@context": [
     "https://www.w3.org/ns/activitystreams",
     "https://w3id.org/security/v1",
-		{
-			"Key": "sec:Key",
-			"additionalPublicKeys": "misskey:additionalPublicKeys"
-		}
+      {
+        "Key": "sec:Key",
+        "additionalPublicKeys": "misskey:additionalPublicKeys"
+      }
   ],
   "id": "https://misskey.io/users/7rkrarq81i",
   "type": "Person",
   "publicKey": {
     "id": "https://misskey.io/users/7rkrarq81i#main-key",
-		"type": "Key",
+    "type": "Key",
     "owner": "https://misskey.io/users/7rkrarq81i",
     "publicKeyPem": "-----BEGIN PUBLIC KEY-----..."
   },
-	"additionalPublicKeys": [{
-  	"id": "https://misskey.io/users/7rkrarq81i#ed25519-key",
-		"type": "Key",
-  	"owner": "https://misskey.io/users/7rkrarq81i",
-  	"publicKeyPem": "-----BEGIN PUBLIC KEY-----..."
-	}]
+  "additionalPublicKeys": [{
+    "id": "https://misskey.io/users/7rkrarq81i#ed25519-key",
+    "type": "Key",
+    "owner": "https://misskey.io/users/7rkrarq81i",
+    "publicKeyPem": "-----BEGIN PUBLIC KEY-----..."
+  }]
 }
 ```
 
@@ -93,3 +93,49 @@ Draft signing and verification accept absolute URLs and origin-form request targ
 ### Sign and Post
 
 See [the usage (sign-and-post.ts)](./test/unit/readme-usage/sign-and-post.ts)
+
+
+## Verification key selection
+
+For RFC 9421 key maps, a matching signature label takes precedence over `keyid`.
+If either selects a key, verification uses that key only. An explicit missing
+`keyid` fails that signature. When there is no `keyid` or mapped label, the declared
+algorithm may select candidates from the map; all candidates are tried until one
+verifies. Malformed or incompatible candidates are skipped. `verifyAll: true`
+requires every signature admitted by the algorithm allowlist to verify;
+`verifyAll: false` accepts any admitted valid signature.
+
+Custom Structured Field headers can be parsed with the same dictionary used to
+sign them:
+
+```ts
+parseRequestSignature(request, {
+  additionalSfvTypeDictionary: { 'x-example': 'dict' },
+});
+```
+
+## Development checks
+
+```sh
+pnpm install --frozen-lockfile
+pnpm eslint
+pnpm build
+pnpm run test --runInBand
+pnpm run test:browser
+```
+
+The browser runner needs Node 22+ and Chrome available as `google-chrome`
+(or set `CHROME_BIN`). It extends the earlier Chrome query regression harness,
+using a temporary isolated profile and localhost server, then removes them.
+The same verification cases run under Jest and native Chrome Web Crypto in the
+main thread and a dedicated worker. They cover independent ECDSA P-256/P-384
+signatures, PEM/CryptoKey verification, candidate selection, malformed/mixed keys,
+allowlists, custom SFV, native Fetch Request signing, and draft RSA/Ed25519 query
+regressions. Unsupported optional Ed25519 is reported as skipped. Firefox, Safari,
+and Service Worker lifecycle/network integration are not covered by this harness.
+
+The ECDSA/SFV corrections adapt Yuanyuan (Li-Yuanyuan)'s
+[upstream PR #20](https://github.com/misskey-dev/node-http-message-signatures/pull/20),
+with corrected algorithm propagation and key selection. The JSON example
+indentation comes from Pichu Chen (PichuChen)'s
+[upstream PR #19](https://github.com/misskey-dev/node-http-message-signatures/pull/19).
