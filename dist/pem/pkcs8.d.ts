@@ -29,7 +29,7 @@ export type ParsedPkcs8 = ParsedAlgorithmIdentifierBase & {
 export declare function parsePkcs8(input: ASN1.StreamOrBinary): ParsedPkcs8;
 /**
  * Parse private key and run `crypto.subtle.importKey`
- * (only supports PKCS#8)
+ * (supports unencrypted PKCS#8 and two-prime PKCS#1 RSA)
  * @param key string or ArrayBuffer
  * @param keyUsages e.g. ['verify']
  * @param defaults

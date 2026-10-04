@@ -602,6 +602,60 @@ import { Base64 } from "@lapo/asn1js/base64.js";
 
 // src/pem/pkcs1.ts
 import { ASN1 } from "@lapo/asn1js";
+
+// src/pem/der.ts
+function readDer(data, offset = 0) {
+  const start = offset;
+  if (offset + 2 > data.length)
+    throw new Error("Truncated DER");
+  const tag = data[offset++];
+  if ((tag & 31) === 31)
+    throw new Error("Unsupported DER tag");
+  let length = data[offset++];
+  if (length & 128) {
+    const count = length & 127;
+    if (!count || count > 4 || offset + count > data.length || data[offset] === 0)
+      throw new Error("Invalid DER length");
+    length = 0;
+    for (let i = 0; i < count; i++)
+      length = length * 256 + data[offset++];
+    if (length < 128)
+      throw new Error("Nonminimal DER length");
+  }
+  const end = offset + length;
+  if (end > data.length)
+    throw new Error("Truncated DER content");
+  return { tag, content: data.subarray(offset, end), encoded: data.subarray(start, end), end };
+}
+function derChildren(data) {
+  const children = [];
+  for (let offset = 0; offset < data.length; ) {
+    const child = readDer(data, offset);
+    children.push(child);
+    offset = child.end;
+  }
+  return children;
+}
+function derSequence(data) {
+  if (data.length > 1024 * 1024)
+    throw new Error("Key DER exceeds size limit");
+  const root = readDer(data);
+  if (root.tag !== 48 || root.end !== data.length)
+    throw new Error("Expected one DER sequence");
+  return derChildren(root.content);
+}
+function unsignedDerInteger(element, allowZero = false) {
+  const bytes = element.content;
+  if (element.tag !== 2 || !bytes.length || bytes[0] & 128)
+    throw new Error("Expected nonnegative DER integer");
+  if (bytes.length > 1 && bytes[0] === 0 && !(bytes[1] & 128))
+    throw new Error("Nonminimal DER integer");
+  if (!allowZero && bytes.every((value) => value === 0))
+    throw new Error("Expected positive DER integer");
+  return bytes;
+}
+
+// src/pem/pkcs1.ts
 var Pkcs1ParseError = class extends Error {
   constructor(message) {
     super(message);
@@ -658,6 +712,39 @@ function genSpkiFromPkcs1(input) {
     // SEQUENCE
     ...rootContent
   ]);
+}
+function parsePkcs1PrivateKey(input) {
+  try {
+    if (typeof input === "string" && /ENCRYPTED|Proc-Type:|DEK-Info:/.test(input))
+      throw new Error("Encrypted private keys are unsupported");
+    const decoded = decodePem(input);
+    const data = typeof decoded === "object" && "enc" in decoded ? decoded.enc : decoded;
+    const bytes = typeof data === "string" ? Uint8Array.from(data, (char) => char.charCodeAt(0)) : data instanceof Uint8Array ? data : data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data);
+    const fields = derSequence(bytes);
+    if (fields.length !== 9)
+      throw new Error("Expected nine two-prime RSA fields");
+    const version = unsignedDerInteger(fields[0], true);
+    if (version.length !== 1 || version[0] !== 0)
+      throw new Error("Only two-prime version 0 is supported");
+    for (const field of fields.slice(1))
+      unsignedDerInteger(field);
+    return { pkcs1: new Uint8Array(bytes).buffer };
+  } catch (error) {
+    throw new Pkcs1ParseError(`Invalid PKCS#1 private key: ${error.message}`);
+  }
+}
+function genPkcs8FromPkcs1(input) {
+  const { pkcs1 } = parsePkcs1PrivateKey(input);
+  const content = Uint8Array.from([
+    2,
+    1,
+    0,
+    ...rsaASN1AlgorithmIdentifier,
+    4,
+    ...genASN1Length(pkcs1.byteLength),
+    ...new Uint8Array(pkcs1)
+  ]);
+  return Uint8Array.from([48, ...genASN1Length(content.length), ...content]);
 }
 
 // src/draft/const.ts
@@ -2361,7 +2448,12 @@ function parsePkcs8(input) {
   };
 }
 async function importPrivateKey(key, keyUsages = ["sign"], defaults = defaultSignInfoDefaults, extractable = false) {
-  const parsedPrivateKey = parsePkcs8(key);
+  let parsedPrivateKey;
+  try {
+    parsedPrivateKey = parsePkcs8(key);
+  } catch {
+    parsedPrivateKey = parsePkcs8(genPkcs8FromPkcs1(key));
+  }
   const importParams = genSignInfo(parsedPrivateKey, defaults);
   return await (await getWebcrypto()).subtle.importKey("pkcs8", parsedPrivateKey.der, importParams, extractable, keyUsages);
 }
@@ -2557,6 +2649,7 @@ export {
   genEcKeyPair,
   genEd25519KeyPair,
   genEd448KeyPair,
+  genPkcs8FromPkcs1,
   genRFC3230DigestHeader,
   genRFC9530DigestHeader,
   genRsaKeyPair,
@@ -2590,6 +2683,7 @@ export {
   parseDraftRequest,
   parseDraftRequestSignatureHeader,
   parsePkcs1,
+  parsePkcs1PrivateKey,
   parsePkcs8,
   parsePublicKey,
   parseRFC9421RequestOrResponse,

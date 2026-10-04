@@ -18,3 +18,9 @@ export declare const rsaASN1AlgorithmIdentifier: Uint8Array;
  * @returns SPKI public key DER
  */
 export declare function genSpkiFromPkcs1(input: ASN1.StreamOrBinary): Uint8Array;
+/** Parse an unencrypted, two-prime RSA private key (RFC 8017 Appendix A.1.2). */
+export declare function parsePkcs1PrivateKey(input: ASN1.StreamOrBinary): {
+    pkcs1: ArrayBuffer;
+};
+/** Wrap a validated two-prime PKCS#1 private key in an unencrypted PKCS#8 container. */
+export declare function genPkcs8FromPkcs1(input: ASN1.StreamOrBinary): Uint8Array;

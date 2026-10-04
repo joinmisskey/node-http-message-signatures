@@ -1,3 +1,4 @@
+import { genPkcs8FromPkcs1 } from './pkcs1.js';
 import { ASN1 } from '@lapo/asn1js';
 import { ParsedAlgorithmIdentifierBase, asn1ToArrayBuffer, decodePem, parseAlgorithmIdentifier } from './spki.js';
 import { SignInfoDefaults, defaultSignInfoDefaults, genSignInfo, getWebcrypto } from '../utils.js';
@@ -51,14 +52,19 @@ export function parsePkcs8(input: ASN1.StreamOrBinary): ParsedPkcs8 {
 }
 /**
  * Parse private key and run `crypto.subtle.importKey`
- * (only supports PKCS#8)
+ * (supports unencrypted PKCS#8 and two-prime PKCS#1 RSA)
  * @param key string or ArrayBuffer
  * @param keyUsages e.g. ['verify']
  * @param defaults
  * @returns CryptoKey
  */
 export async function importPrivateKey(key: ASN1.StreamOrBinary, keyUsages: KeyUsage[] = ['sign'], defaults: SignInfoDefaults = defaultSignInfoDefaults, extractable = false) {
-	const parsedPrivateKey = parsePkcs8(key);
+	let parsedPrivateKey: ParsedPkcs8;
+	try {
+		parsedPrivateKey = parsePkcs8(key);
+	} catch {
+		parsedPrivateKey = parsePkcs8(genPkcs8FromPkcs1(key));
+	}
 	const importParams = genSignInfo(parsedPrivateKey, defaults);
 	return await (await getWebcrypto()).subtle.importKey('pkcs8', parsedPrivateKey.der, importParams, extractable, keyUsages);
 }

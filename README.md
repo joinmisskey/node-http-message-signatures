@@ -139,3 +139,7 @@ The ECDSA/SFV corrections adapt Yuanyuan (Li-Yuanyuan)'s
 with corrected algorithm propagation and key selection. The JSON example
 indentation comes from Pichu Chen (PichuChen)'s
 [upstream PR #19](https://github.com/misskey-dev/node-http-message-signatures/pull/19).
+
+### PKCS#1 private keys
+
+`importPrivateKey` accepts unencrypted two-prime RSA PKCS#1 PEM/DER as well as PKCS#8. `parsePkcs1PrivateKey` validates the version-0 DER structure, and `genPkcs8FromPkcs1` returns a PKCS#8 wrapper. Encrypted keys, multiprime RSA, trailing bytes, negative/zero key integers, and nonminimal DER encodings are rejected. The default RSA signing algorithm remains RSASSA-PKCS1-v1_5 with SHA-256.

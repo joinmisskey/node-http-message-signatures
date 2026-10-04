@@ -1,6 +1,7 @@
 import { ASN1 } from '@lapo/asn1js';
 import { asn1ToArrayBuffer, decodePem } from './spki.js';
 import { genASN1Length } from '../utils.js';
+import { derSequence, unsignedDerInteger } from './der.js';
 
 export class Pkcs1ParseError extends Error {
 	constructor(message: string) { super(message); }
@@ -50,4 +51,33 @@ export function genSpkiFromPkcs1(input: ASN1.StreamOrBinary): Uint8Array {
 		0x30, ...genASN1Length(rootContent.length), // SEQUENCE
 			...rootContent,
 	]);
+}
+
+/** Parse an unencrypted, two-prime RSA private key (RFC 8017 Appendix A.1.2). */
+export function parsePkcs1PrivateKey(input: ASN1.StreamOrBinary): { pkcs1: ArrayBuffer } {
+	try {
+		if (typeof input === 'string' && /ENCRYPTED|Proc-Type:|DEK-Info:/.test(input)) throw new Error('Encrypted private keys are unsupported');
+		const decoded = decodePem(input);
+		const data = typeof decoded === 'object' && 'enc' in decoded ? decoded.enc : decoded;
+		const bytes = typeof data === 'string' ? Uint8Array.from(data, char => char.charCodeAt(0))
+			: data instanceof Uint8Array ? data : data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data as number[]);
+		const fields = derSequence(bytes);
+		if (fields.length !== 9) throw new Error('Expected nine two-prime RSA fields');
+		const version = unsignedDerInteger(fields[0], true);
+		if (version.length !== 1 || version[0] !== 0) throw new Error('Only two-prime version 0 is supported');
+		for (const field of fields.slice(1)) unsignedDerInteger(field);
+		return { pkcs1: new Uint8Array(bytes).buffer };
+	} catch (error) {
+		throw new Pkcs1ParseError(`Invalid PKCS#1 private key: ${(error as Error).message}`);
+	}
+}
+
+/** Wrap a validated two-prime PKCS#1 private key in an unencrypted PKCS#8 container. */
+export function genPkcs8FromPkcs1(input: ASN1.StreamOrBinary): Uint8Array {
+	const { pkcs1 } = parsePkcs1PrivateKey(input);
+	const content = Uint8Array.from([
+		2, 1, 0, ...rsaASN1AlgorithmIdentifier,
+		4, ...genASN1Length(pkcs1.byteLength), ...new Uint8Array(pkcs1),
+	]);
+	return Uint8Array.from([0x30, ...genASN1Length(content.length), ...content]);
 }
