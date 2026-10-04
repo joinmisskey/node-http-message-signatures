@@ -6,10 +6,6 @@ jobs:
   lint:
     runs-on: ubuntu-latest
 
-    strategy:
-      matrix:
-        node-version: [20.10.0]
-
     steps:
       - uses: actions/checkout@v4
       - name: Install pnpm
@@ -17,10 +13,10 @@ jobs:
         with:
           version: 8.15.4
           run_install: false
-      - name: Use Node.js ${{ matrix.node-version }}
+      - name: Use Node.js 24
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: '24.x'
           cache: 'pnpm'
       - name: Install
         run: |
