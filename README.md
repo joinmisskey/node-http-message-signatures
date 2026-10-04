@@ -192,3 +192,33 @@ const valid = await verifyParsedSignature(parsed, {
 
 `verifyParsedSignature` verifies the supplied parsed cryptographic base. Time and required-component checks remain in parsing; body digest validation remains a separate call. Hooks do not add or bypass those checks. Keyless verification requires a declared wire algorithm with unambiguous operation parameters (RFC supported algorithms, draft RSA/Ed25519/Ed448); draft ECDSA needs a resolved key for its curve. Algorithm allowlists and all-versus-any behavior remain in RFC verification.
 PEM/hex/base64 key strings are limited to 4 MiB before decoding; decoded and binary key inputs are limited to 1 MiB before generic ASN.1 parsing. These limits preserve normal PEM whitespace and typical key sizes. The strict DER reader for new key containers limits each field list to 64 entries; supported structures have at most nine.
+
+### Optional Node slacc adapters
+
+The separate `@misskey-dev/node-http-message-signatures/node/slacc` entry point provides caller-injected adapters. The main entry point remains WebCrypto-based and contains no slacc import or runtime dependency. Install slacc in the consuming Node application only if using this entry point; slacc's platform-specific native binary must be available. Both tested versions require Node `>=24 || ^23.6.0 || ^22.14.0`, independently of this package's broader engines declaration.
+
+For slacc **0.2.0**, `createSlaccSigningKey(binding, { keyId, version, algorithm, privateKey })` supports `rsa-v1_5-sha256` and `ed25519`. `version` is required: draft keys use `rsa-sha256` / `ed25519-sha512` wire identifiers, while RFC 9421 keys use `rsa-v1_5-sha256` / `ed25519`. The Ed25519 draft identifier does not introduce a prehash. The returned key works with the corresponding existing high-level signing function. `createSlaccVerifier(binding, { algorithm, publicKey, version? })` verifies either version unless one is explicitly configured.
+
+Keys are explicit PEM strings, Uint8Array/Buffer DER, or ArrayBuffer DER. Unencrypted version-0 PKCS#8 without attributes is supported; strict two-prime RSA PKCS#1 is normalized to PKCS#8. Public inputs accept SPKI or strict RSA PKCS#1. RSA keys must be 2048–8192 bits. Algorithm OIDs, container structure and key type are validated before native handle construction. CryptoKey, JWK, encrypted keys, RSA-PSS, ECDSA, Ed448 and unknown suites are rejected. Nonextractable CryptoKeys are never exported. Constructors retain native handles for reuse; they do not install slacc, initialize/reconfigure its shared pool, fetch keys or create global caches.
+
+The verifier closes over one trusted public key and requires a **keyless context**. Use `{ verifier }` with no `keys`/`resolveKey`; supplying a CryptoKey in the context is rejected. High-level keyless verification requires an explicit, unambiguous wire algorithm; use the existing keyed WebCrypto path for omitted `alg` or ambiguous draft `hs2019`. A multi-key application must route by trusted key ID/label to the appropriate verifier itself and enforce identity authorization. No key lookup or network access is performed. Unsupported operations throw; callback errors propagate, false verification remains false, and there is no automatic backend fallback. If needed, callers explicitly route other operations to `webCryptoVerifier` before invoking an adapter.
+
+Current Misskey uses slacc **0.1.5**, whose API supports RSA signing only. It can use `createLegacySlaccRsaSigningKey` without upgrading slacc; keep incoming verification on the existing WebCrypto path. For example, inside a Misskey service that already initializes slacc once at startup:
+
+```ts
+import * as slacc from 'slacc'; // application-owned slacc 0.1.5
+import { createLegacySlaccRsaSigningKey } from '@misskey-dev/node-http-message-signatures/node/slacc';
+import { signAsDraftToRequest, parseRequestSignature, verifyParsedSignature } from '@misskey-dev/node-http-message-signatures';
+
+// Construct when the local actor's key changes; cache according to the application's key lifecycle.
+const signingKey = createLegacySlaccRsaSigningKey(slacc, {
+  keyId: actorKeyId, version: 'draft', privateKey: actorPrivateKeyPem,
+});
+await signAsDraftToRequest(request, signingKey, ['(request-target)', 'host', 'date']);
+// trustedRemotePublicKeyPem is selected and authorized by the caller.
+const valid = await verifyParsedSignature(parseRequestSignature(incomingRequest), trustedRemotePublicKeyPem);
+```
+
+For modern slacc, import `createSlaccSigningKey`/`createSlaccVerifier`, pass the application's 0.2 binding, and select the algorithm explicitly. slacc's `init(threadCount)` must run once before signing/verifying; Misskey already owns this initialization. The native API has no shutdown, cancellation or queue-limit controls. Avoid creating duplicate pools or handles per request. The adapters call `signRaw`/`verifyRaw` (legacy `sign`) over the exact UTF-8 signature base; `*Parts` hashing is incompatible with HTTP signature bases and is never used.
+
+Native tests execute 0.1.5 and 0.2.0 in separate processes. Run the opt-in bounded benchmark with `pnpm performance:slacc modern` or `pnpm performance:slacc legacy`: it compares cold construction and warm reused handles with WebCrypto for RSA 2048/4096 and modern Ed25519 at concurrency 1/16, using one slacc thread by default. For a matched four-thread comparison, run `UV_THREADPOOL_SIZE=4 pnpm performance:slacc modern 4` (or `legacy 4`) in a fresh process. Results depend on workload and machine; no general speedup is promised. Browser and edge applications should import the main entry point, not the Node adapter.

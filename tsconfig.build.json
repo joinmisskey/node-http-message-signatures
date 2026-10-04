@@ -1,7 +1,8 @@
 {
 	"extends": "./tsconfig.json",
 	"include": [
-		"./src/index.ts"
+		"./src/index.ts",
+		"./src/node/slacc.ts"
 	],
 	"compilerOptions": {
 		"emitDeclarationOnly": true,
