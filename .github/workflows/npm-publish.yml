@@ -1,42 +1,82 @@
-name: Publish Node.js Package
+name: Stage Node.js Package
 
 on:
   release:
-    types: [created]
-
+    types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing reviewed tag matching package.json (for example v0.0.11)'
+        type: string
+        required: true
+      dist_tag:
+        description: 'Stable: latest; prerelease: first identifier (alpha, beta, rc, next)'
+        type: choice
+        options: [latest, alpha, beta, rc, next]
+        default: latest
+        required: true
+      confirm_stage:
+        description: 'I approve staging the selected tag on npm for owner review'
+        type: boolean
+        default: false
+        required: true
+
+concurrency:
+  group: npm-stage
+  cancel-in-progress: false
 
 jobs:
-  publish:
+  stage:
+    if: github.repository == 'joinmisskey/node-http-message-signatures' && (github.event_name == 'release' || inputs.confirm_stage)
     runs-on: ubuntu-latest
-
     permissions:
       contents: read
       id-token: write
-
-    strategy:
-      matrix:
-        node-version: [20.10.0]
-
     steps:
-      - uses: actions/checkout@v4
-      - name: Install pnpm
-        uses: pnpm/action-setup@v2
+      - uses: actions/checkout@v6
         with:
-          version: 8
+          ref: ${{ github.event.release.tag_name || inputs.release_tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - name: Install pinned npm with Trusted Publishing support
+        run: npm install --global npm@12.2.0
+      - name: Install pinned pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 8.15.4
           run_install: false
-      - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: 'pnpm'
-          registry-url: 'https://registry.npmjs.org'
-      - name: Publish package
+      - name: Validate release guards
+        id: release
         run: |
-          corepack enable
-          pnpm i --frozen-lockfile
-          pnpm build
-          pnpm publish --access public --no-git-checks --provenance
+          node --test scripts/release-info.test.mjs
+          node scripts/release-info.mjs
+      - name: Verify checkout is the selected tag from main history
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")"
+          git merge-base --is-ancestor HEAD origin/main
+      - name: Install, lint, build and test
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm eslint
+          pnpm build
+          pnpm run test --runInBand
+      - name: Pack and inspect the release artifact
+        env:
+          TARBALL: ${{ steps.release.outputs.tarball }}
+          DIST_TAG: ${{ steps.release.outputs.dist_tag }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/npm-package"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/npm-package"
+          test -f "$RUNNER_TEMP/npm-package/$TARBALL"
+          npm stage publish "$RUNNER_TEMP/npm-package/$TARBALL" --dry-run --ignore-scripts --access public --tag "$DIST_TAG" --registry https://registry.npmjs.org
+      - name: Stage the same artifact using npm OIDC
+        env:
+          TARBALL: ${{ steps.release.outputs.tarball }}
+          DIST_TAG: ${{ steps.release.outputs.dist_tag }}
+        run: npm stage publish "$RUNNER_TEMP/npm-package/$TARBALL" --ignore-scripts --access public --tag "$DIST_TAG" --registry https://registry.npmjs.org
