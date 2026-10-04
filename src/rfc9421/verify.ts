@@ -1,6 +1,7 @@
 import type { PublicKeySource } from '../types.js';
-import { ParsedRFC9421Signature, RFC9421SignatureAlgorithm } from "../types.js";
+import { ParsedRFC9421Signature, RFC9421SignatureAlgorithm, SignatureHashAlgorithmUpperSnake } from "../types.js";
 import { parseAndImportPublicKey } from "../pem/spki.js";
+import { getRFC9421AlgoString } from "./sign.js";
 import { getWebcrypto } from "../utils.js";
 import { base64 } from "rfc4648";
 import { textEncoder } from "../const.js";
@@ -64,6 +65,7 @@ export async function verifyRFC9421Signature(
 		);
 	}
 
+	let eligibleSignatures = 0;
 	for (const [label, parsed] of toVerify) {
 		const alg = parsed.algorithm?.toLowerCase();
 		let candidates: PublicKeySource[];
@@ -79,11 +81,19 @@ export async function verifyRFC9421Signature(
 		}
 
 		let verified = false;
+		let eligible = alg !== undefined || candidates.length === 0;
 		for (const candidate of candidates) {
 			try {
 				// Import per signature and algorithm; defaults or another signature's
 				// imported key must not determine the hash/curve used here.
 				const { publicKey, algorithm } = await parseAndImportPublicKey(candidate, ['verify'], alg);
+				if (!alg) {
+					const importedHash = ('hash' in algorithm ? algorithm.hash : null) as string | { name: string } | null;
+					const hash = typeof importedHash === 'object' && importedHash !== null ? importedHash.name : importedHash;
+					const effective = getRFC9421AlgoString(publicKey.algorithm, hash as SignatureHashAlgorithmUpperSnake);
+					if (!algorithms.includes(effective as RFC9421SignatureAlgorithm)) continue;
+				}
+				eligible = true;
 				const result = await (await getWebcrypto()).subtle.verify(
 					algorithm, publicKey, base64.parse(parsed.signature), textEncoder.encode(parsed.base)
 				);
@@ -93,11 +103,14 @@ export async function verifyRFC9421Signature(
 				}
 				if (errorLogger) errorLogger(`verification simply failed, label: ${label}`);
 			} catch (e) {
+				eligible = true;
 				// A malformed/incompatible candidate does not invalidate alternatives.
 				if (errorLogger) errorLogger(`Something happened in ${label}: ${e}`);
 			}
 		}
 
+		if (!eligible) continue;
+		eligibleSignatures++;
 		if (options.verifyAll === true && !verified) {
 			if (candidates.length === 0 && errorLogger) errorLogger(`key not found, label: ${label}, keyid: ${parsed.keyid}`);
 			return false;
@@ -105,5 +118,5 @@ export async function verifyRFC9421Signature(
 		if (options.verifyAll === false && verified) return true;
 	}
 
-	return options.verifyAll === true;
+	return options.verifyAll === true && eligibleSignatures > 0;
 }

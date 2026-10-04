@@ -768,6 +768,372 @@ async function verifyDraftSignature(parsed, key, errorLogger) {
   return false;
 }
 
+// src/pem/der.ts
+function readDer(data, offset = 0) {
+  const start = offset;
+  if (offset + 2 > data.length)
+    throw new Error("Truncated DER");
+  const tag = data[offset++];
+  if ((tag & 31) === 31)
+    throw new Error("Unsupported DER tag");
+  let length = data[offset++];
+  if (length & 128) {
+    const count = length & 127;
+    if (!count || count > 4 || offset + count > data.length || data[offset] === 0)
+      throw new Error("Invalid DER length");
+    length = 0;
+    for (let i = 0; i < count; i++)
+      length = length * 256 + data[offset++];
+    if (length < 128)
+      throw new Error("Nonminimal DER length");
+  }
+  const end = offset + length;
+  if (end > data.length)
+    throw new Error("Truncated DER content");
+  return { tag, content: data.subarray(offset, end), encoded: data.subarray(start, end), end };
+}
+function derChildren(data) {
+  const children = [];
+  for (let offset = 0; offset < data.length; ) {
+    const child = readDer(data, offset);
+    if (children.length >= 64)
+      throw new Error("Too many DER fields");
+    children.push(child);
+    offset = child.end;
+  }
+  return children;
+}
+function derSequence(data) {
+  if (data.length > 1024 * 1024)
+    throw new Error("Key DER exceeds size limit");
+  const root = readDer(data);
+  if (root.tag !== 48 || root.end !== data.length)
+    throw new Error("Expected one DER sequence");
+  return derChildren(root.content);
+}
+function unsignedDerInteger(element, allowZero = false) {
+  const bytes = element.content;
+  if (element.tag !== 2 || !bytes.length || bytes[0] & 128)
+    throw new Error("Expected nonnegative DER integer");
+  if (bytes.length > 1 && bytes[0] === 0 && !(bytes[1] & 128))
+    throw new Error("Nonminimal DER integer");
+  if (!allowZero && bytes.every((value) => value === 0))
+    throw new Error("Expected positive DER integer");
+  return bytes;
+}
+
+// src/pem/pkcs1.ts
+var import_asn1js = require("@lapo/asn1js");
+var Pkcs1ParseError = class extends Error {
+  constructor(message) {
+    super(message);
+  }
+};
+function parsePkcs1(input) {
+  const parsed = import_asn1js.ASN1.decode(decodePem(input));
+  if (!parsed.sub || parsed.sub.length !== 2)
+    throw new Pkcs1ParseError("Invalid SPKI (invalid sub length)");
+  const modulus = parsed.sub[0];
+  const publicExponent = parsed.sub[1];
+  if (!modulus || modulus.tag.tagNumber !== 2)
+    throw new Pkcs1ParseError("Invalid SPKI (invalid modulus)");
+  if (!publicExponent || publicExponent.tag.tagNumber !== 2)
+    throw new Pkcs1ParseError("Invalid SPKI (invalid publicExponent)");
+  return {
+    pkcs1: asn1ToArrayBuffer(parsed),
+    modulus: (asn1ToArrayBuffer(modulus, true).byteLength - 1) * 8,
+    publicExponent: parseInt(publicExponent.content() || "0")
+  };
+}
+var rsaASN1AlgorithmIdentifier = Uint8Array.from([
+  48,
+  13,
+  6,
+  9,
+  42,
+  134,
+  72,
+  134,
+  247,
+  13,
+  1,
+  1,
+  1,
+  // 1.2.840.113549.1.1.1
+  5,
+  0
+]);
+function genSpkiFromPkcs1(input) {
+  const { pkcs1 } = parsePkcs1(input);
+  const pkcsLength = genASN1Length(pkcs1.byteLength + 1);
+  const rootContent = Uint8Array.from([
+    ...rsaASN1AlgorithmIdentifier,
+    3,
+    ...pkcsLength,
+    // BIT STRING
+    0,
+    ...new Uint8Array(pkcs1)
+  ]);
+  return Uint8Array.from([
+    48,
+    ...genASN1Length(rootContent.length),
+    // SEQUENCE
+    ...rootContent
+  ]);
+}
+function parsePkcs1PrivateKey(input) {
+  try {
+    if (typeof input === "string" && /ENCRYPTED|Proc-Type:|DEK-Info:/.test(input))
+      throw new Error("Encrypted private keys are unsupported");
+    const decoded = decodePem(input);
+    const data = typeof decoded === "object" && "enc" in decoded ? decoded.enc : decoded;
+    const bytes = typeof data === "string" ? Uint8Array.from(data, (char) => char.charCodeAt(0)) : data instanceof Uint8Array ? data : data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data);
+    const fields = derSequence(bytes);
+    if (fields.length !== 9)
+      throw new Error("Expected nine two-prime RSA fields");
+    const version = unsignedDerInteger(fields[0], true);
+    if (version.length !== 1 || version[0] !== 0)
+      throw new Error("Only two-prime version 0 is supported");
+    for (const field of fields.slice(1))
+      unsignedDerInteger(field);
+    return { pkcs1: new Uint8Array(bytes).buffer };
+  } catch (error) {
+    throw new Pkcs1ParseError(`Invalid PKCS#1 private key: ${error.message}`);
+  }
+}
+function genPkcs8FromPkcs1(input) {
+  const { pkcs1 } = parsePkcs1PrivateKey(input);
+  const content = Uint8Array.from([
+    2,
+    1,
+    0,
+    ...rsaASN1AlgorithmIdentifier,
+    4,
+    ...genASN1Length(pkcs1.byteLength),
+    ...new Uint8Array(pkcs1)
+  ]);
+  return Uint8Array.from([48, ...genASN1Length(content.length), ...content]);
+}
+
+// src/pem/pss.ts
+var sha512Oid = [96, 134, 72, 1, 101, 3, 4, 2, 3];
+var mgf1Oid = [42, 134, 72, 134, 247, 13, 1, 1, 8];
+function matchesOid(element, expected) {
+  return element.tag === 6 && element.content.length === expected.length && element.content.every((byte, i) => byte === expected[i]);
+}
+function hash512(element) {
+  if (element.tag !== 48)
+    throw new Error("Invalid PSS hash identifier");
+  const parts = derChildren(element.content);
+  if (parts.length < 1 || parts.length > 2 || !matchesOid(parts[0], sha512Oid) || parts[1] && (parts[1].tag !== 5 || parts[1].content.length)) {
+    throw new Error("RSA-PSS requires SHA-512");
+  }
+}
+function validateRfc9421PssParameters(identifier) {
+  const parts = derSequence(identifier.encoded);
+  if (parts.length === 1)
+    return;
+  if (parts.length !== 2 || parts[1].tag !== 48)
+    throw new Error("Invalid RSA-PSS parameters");
+  let hash = false;
+  let mgf = false;
+  let saltLength = 20;
+  let lastTag = -1;
+  for (const field of derChildren(parts[1].content)) {
+    if (field.tag < 160 || field.tag > 163 || field.tag <= lastTag)
+      throw new Error("Invalid RSA-PSS parameter field");
+    lastTag = field.tag;
+    const values = derChildren(field.content);
+    if (values.length !== 1)
+      throw new Error("Invalid explicit RSA-PSS field");
+    if (field.tag === 160) {
+      hash512(values[0]);
+      hash = true;
+    }
+    if (field.tag === 161) {
+      const mgfParts = derSequence(values[0].encoded);
+      if (mgfParts.length !== 2 || !matchesOid(mgfParts[0], mgf1Oid))
+        throw new Error("RSA-PSS requires MGF1");
+      hash512(mgfParts[1]);
+      mgf = true;
+    }
+    if (field.tag === 162 || field.tag === 163) {
+      const integer = unsignedDerInteger(values[0], true);
+      if (integer.length > 2)
+        throw new Error("Unsupported RSA-PSS integer parameter");
+      const value = integer.reduce((total, byte) => total * 256 + byte, 0);
+      if (field.tag === 162)
+        saltLength = value;
+      else if (value !== 1)
+        throw new Error("Unsupported RSA-PSS trailer");
+    }
+  }
+  if (!hash || !mgf || saltLength > 64)
+    throw new Error("RSA-PSS key restrictions conflict with RFC 9421");
+}
+function normalizePssContainer(data, identifierIndex) {
+  const fields = derSequence(data);
+  validateRfc9421PssParameters(fields[identifierIndex]);
+  const content = fields.flatMap((field, i) => Array.from(i === identifierIndex ? rsaASN1AlgorithmIdentifier : field.encoded));
+  return Uint8Array.from([48, ...genASN1Length(content.length), ...content]).buffer;
+}
+
+// src/pem/pkcs8.ts
+var import_asn1js2 = require("@lapo/asn1js");
+var Pkcs8ParseError = class extends Error {
+  constructor(message) {
+    super(message);
+  }
+};
+function parsePkcs8(input) {
+  const parsed = import_asn1js2.ASN1.decode(decodePem(input));
+  if (!parsed.sub || parsed.sub.length < 3 || parsed.sub.length > 4)
+    throw new Pkcs8ParseError("Invalid PKCS#8 (invalid sub length)");
+  const version = parsed.sub[0];
+  if (!version || !version.tag || version.tag.tagNumber !== 2)
+    throw new Pkcs8ParseError("Invalid PKCS#8 (invalid version)");
+  const privateKeyAlgorithm = parseAlgorithmIdentifier(parsed.sub[1]);
+  if (privateKeyAlgorithm.algorithm.split("\n")[0] === "1.2.840.113549.1.1.10" && parsed.posEnd() !== parsed.stream.enc.length)
+    throw new Pkcs8ParseError("Trailing PSS key data");
+  const privateKey = parsed.sub[2];
+  if (!privateKey || !privateKey.tag || privateKey.tag.tagNumber !== 4)
+    throw new Pkcs8ParseError("Invalid PKCS#8 (invalid privateKey)");
+  const attributes = parsed.sub[3];
+  if (attributes) {
+    if (attributes.tag.tagNumber !== 49)
+      throw new Pkcs8ParseError("Invalid PKCS#8 (invalid attributes)");
+  }
+  return {
+    der: privateKeyAlgorithm.algorithm.split("\n")[0] === "1.2.840.113549.1.1.10" ? normalizePssContainer(new Uint8Array(asn1ToArrayBuffer(parsed)), 1) : asn1ToArrayBuffer(parsed),
+    ...privateKeyAlgorithm,
+    attributesRaw: attributes ? asn1ToArrayBuffer(attributes) : null
+  };
+}
+async function importPrivateKey(key, keyUsages = ["sign"], defaults = defaultSignInfoDefaults, extractable = false) {
+  if (typeof key === "object" && "kty" in key)
+    return importPrivateJwk(key, keyUsages, defaults, extractable);
+  key = key;
+  let parsedPrivateKey;
+  try {
+    parsedPrivateKey = parsePkcs8(key);
+  } catch {
+    parsedPrivateKey = parsePkcs8(genPkcs8FromPkcs1(key));
+  }
+  const importParams = genSignInfo(parsedPrivateKey, defaults);
+  return await (await getWebcrypto()).subtle.importKey("pkcs8", parsedPrivateKey.der, importParams, extractable, keyUsages);
+}
+
+// src/rfc9421/sign.ts
+var sh = __toESM(require_dist(), 1);
+
+// src/shared/sign.ts
+async function genSignature(privateKey, signingString, defaults = defaultSignInfoDefaults) {
+  const signatureAB = await (await getWebcrypto()).subtle.sign(genAlgorithmForSignAndVerify(privateKey.algorithm, defaults.hash), privateKey, textEncoder.encode(signingString));
+  return encodeArrayBufferToBase64(signatureAB);
+}
+
+// src/rfc9421/sign.ts
+function getRFC9421AlgoString(keyAlgorithm, hashAlgorithm) {
+  if (typeof keyAlgorithm === "string") {
+    keyAlgorithm = { name: keyAlgorithm };
+  }
+  if (keyAlgorithm.name === "RSA-PSS") {
+    if (hashAlgorithm !== "SHA-512" || keyAlgorithm.hash?.name !== "SHA-512")
+      throw new Error("RFC 9421 RSA-PSS requires SHA-512");
+    return "rsa-pss-sha512";
+  }
+  if (keyAlgorithm.name === "RSASSA-PKCS1-v1_5") {
+    if (hashAlgorithm === "SHA-256")
+      return "rsa-v1_5-sha256";
+    if (hashAlgorithm === "SHA-512")
+      return "rsa-v1_5-sha512";
+    throw new Error(`unsupported hash(RSASSA-PKCS1-v1_5): ${hashAlgorithm}`);
+  }
+  if (keyAlgorithm.name === "ECDSA") {
+    if (keyAlgorithm.namedCurve === "P-256" && hashAlgorithm === "SHA-256") {
+      return `ecdsa-p256-sha256`;
+    }
+    if (keyAlgorithm.namedCurve === "P-384" && hashAlgorithm === "SHA-384") {
+      return `ecdsa-p384-sha384`;
+    }
+    throw new Error(`unsupported curve(${keyAlgorithm.namedCurve}) or hash(${hashAlgorithm})`);
+  }
+  if (keyAlgorithm.name === "Ed25519") {
+    return `ed25519`;
+  }
+  throw new Error(`unsupported keyAlgorithm(${JSON.stringify(keyAlgorithm)}) or hash(${hashAlgorithm})`);
+}
+async function processSingleRFC9421SignSource(source) {
+  const defaults = "privateKeyJwk" in source.key ? getJwkSigningDefaults(source.key.privateKeyJwk, source.defaults) : source.defaults ?? defaultSignInfoDefaults;
+  const privateKey = "privateKey" in source.key ? source.key.privateKey : await importPrivateKey("privateKeyJwk" in source.key ? source.key.privateKeyJwk : source.key.privateKeyPem, ["sign"], defaults);
+  const alg = getRFC9421AlgoString(privateKey.algorithm, defaults.hash);
+  const created = source.created ?? Math.round(Date.now() / 1e3);
+  const expires = source.expiresAfter ? created + source.expiresAfter : void 0;
+  return {
+    key: privateKey,
+    params: [
+      source.identifiers,
+      {
+        keyid: source.key.keyId,
+        alg,
+        created,
+        expires,
+        nonce: source.nonce,
+        tag: source.tag
+      }
+    ]
+  };
+}
+async function signAsRFC9421ToRequestOrResponse(request, sources, signatureBaseOptions = {
+  scheme: "https",
+  additionalSfvTypeDictionary: {}
+}) {
+  const sourcesMap = getMap(sources);
+  const keys = /* @__PURE__ */ new Map();
+  const signingDefaults = /* @__PURE__ */ new Map();
+  const inputDictionary = /* @__PURE__ */ new Map();
+  for (const [label, source] of sourcesMap) {
+    const { key, params } = await processSingleRFC9421SignSource(source);
+    signingDefaults.set(label, "privateKeyJwk" in source.key ? getJwkSigningDefaults(source.key.privateKeyJwk, source.defaults) : source.defaults ?? defaultSignInfoDefaults);
+    keys.set(label, key);
+    inputDictionary.set(label, params);
+  }
+  const inputHeader = convertSignatureParamsDictionary(inputDictionary);
+  setHeaderToRequestOrResponse(request, "Signature-Input", inputHeader);
+  const factory = new RFC9421SignatureBaseFactory(
+    request,
+    signatureBaseOptions.scheme,
+    signatureBaseOptions.additionalSfvTypeDictionary,
+    signatureBaseOptions.request
+  );
+  const signaturesEntries = (factory.isRequest() ? factory.requestSignatureInput : factory.responseSignatureInput)?.keys();
+  if (!signaturesEntries)
+    throw new Error(`signaturesEntries is undefined`);
+  const signatureDictionary = /* @__PURE__ */ new Map();
+  const signatureBases = /* @__PURE__ */ new Map();
+  for (const label of signaturesEntries) {
+    const base = factory.generate(label);
+    const key = keys.get(label);
+    if (!key)
+      throw new Error(`key not found: ${label}`);
+    signatureBases.set(label, base);
+    signatureDictionary.set(label, [
+      new sh.ByteSequence(
+        await genSignature(key, base, signingDefaults.get(label) ?? defaultSignInfoDefaults)
+      ),
+      /* @__PURE__ */ new Map()
+    ]);
+  }
+  const signatureHeader = sh.serializeDictionary(signatureDictionary);
+  setHeaderToRequestOrResponse(request, "Signature", signatureHeader);
+  return {
+    inputHeader,
+    signatureHeader,
+    signatureDictionary,
+    signatureBases
+  };
+}
+
 // src/rfc9421/verify.ts
 var import_rfc46482 = require("rfc4648");
 var algorithmsDefault = ["ed25519", "rsa-pss-sha512", "ecdsa-p384-sha384", "ecdsa-p256-sha256", "hmac-sha256", "rsa-v1_5-sha256"];
@@ -797,6 +1163,7 @@ async function verifyRFC9421Signature(parsedEntries, keys, options = {
       ([, a], [, b]) => algorithms.indexOf(a.algorithm?.toLowerCase()) - algorithms.indexOf(b.algorithm?.toLowerCase())
     );
   }
+  let eligibleSignatures = 0;
   for (const [label, parsed] of toVerify) {
     const alg = parsed.algorithm?.toLowerCase();
     let candidates;
@@ -810,9 +1177,18 @@ async function verifyRFC9421Signature(parsedEntries, keys, options = {
       candidates = alg ? Array.from(keys.values()) : [];
     }
     let verified = false;
+    let eligible = alg !== void 0 || candidates.length === 0;
     for (const candidate of candidates) {
       try {
         const { publicKey, algorithm } = await parseAndImportPublicKey(candidate, ["verify"], alg);
+        if (!alg) {
+          const importedHash = "hash" in algorithm ? algorithm.hash : null;
+          const hash = typeof importedHash === "object" && importedHash !== null ? importedHash.name : importedHash;
+          const effective = getRFC9421AlgoString(publicKey.algorithm, hash);
+          if (!algorithms.includes(effective))
+            continue;
+        }
+        eligible = true;
         const result = await (await getWebcrypto()).subtle.verify(
           algorithm,
           publicKey,
@@ -826,10 +1202,14 @@ async function verifyRFC9421Signature(parsedEntries, keys, options = {
         if (errorLogger)
           errorLogger(`verification simply failed, label: ${label}`);
       } catch (e) {
+        eligible = true;
         if (errorLogger)
           errorLogger(`Something happened in ${label}: ${e}`);
       }
     }
+    if (!eligible)
+      continue;
+    eligibleSignatures++;
     if (options.verifyAll === true && !verified) {
       if (candidates.length === 0 && errorLogger)
         errorLogger(`key not found, label: ${label}, keyid: ${parsed.keyid}`);
@@ -838,7 +1218,7 @@ async function verifyRFC9421Signature(parsedEntries, keys, options = {
     if (options.verifyAll === false && verified)
       return true;
   }
-  return options.verifyAll === true;
+  return options.verifyAll === true && eligibleSignatures > 0;
 }
 
 // src/shared/verify.ts
@@ -1020,216 +1400,8 @@ function getJwkSigningDefaults(jwk, defaults) {
   };
 }
 
-// src/pem/der.ts
-function readDer(data, offset = 0) {
-  const start = offset;
-  if (offset + 2 > data.length)
-    throw new Error("Truncated DER");
-  const tag = data[offset++];
-  if ((tag & 31) === 31)
-    throw new Error("Unsupported DER tag");
-  let length = data[offset++];
-  if (length & 128) {
-    const count = length & 127;
-    if (!count || count > 4 || offset + count > data.length || data[offset] === 0)
-      throw new Error("Invalid DER length");
-    length = 0;
-    for (let i = 0; i < count; i++)
-      length = length * 256 + data[offset++];
-    if (length < 128)
-      throw new Error("Nonminimal DER length");
-  }
-  const end = offset + length;
-  if (end > data.length)
-    throw new Error("Truncated DER content");
-  return { tag, content: data.subarray(offset, end), encoded: data.subarray(start, end), end };
-}
-function derChildren(data) {
-  const children = [];
-  for (let offset = 0; offset < data.length; ) {
-    const child = readDer(data, offset);
-    children.push(child);
-    offset = child.end;
-  }
-  return children;
-}
-function derSequence(data) {
-  if (data.length > 1024 * 1024)
-    throw new Error("Key DER exceeds size limit");
-  const root = readDer(data);
-  if (root.tag !== 48 || root.end !== data.length)
-    throw new Error("Expected one DER sequence");
-  return derChildren(root.content);
-}
-function unsignedDerInteger(element, allowZero = false) {
-  const bytes = element.content;
-  if (element.tag !== 2 || !bytes.length || bytes[0] & 128)
-    throw new Error("Expected nonnegative DER integer");
-  if (bytes.length > 1 && bytes[0] === 0 && !(bytes[1] & 128))
-    throw new Error("Nonminimal DER integer");
-  if (!allowZero && bytes.every((value) => value === 0))
-    throw new Error("Expected positive DER integer");
-  return bytes;
-}
-
-// src/pem/pkcs1.ts
-var import_asn1js = require("@lapo/asn1js");
-var Pkcs1ParseError = class extends Error {
-  constructor(message) {
-    super(message);
-  }
-};
-function parsePkcs1(input) {
-  const parsed = import_asn1js.ASN1.decode(decodePem(input));
-  if (!parsed.sub || parsed.sub.length !== 2)
-    throw new Pkcs1ParseError("Invalid SPKI (invalid sub length)");
-  const modulus = parsed.sub[0];
-  const publicExponent = parsed.sub[1];
-  if (!modulus || modulus.tag.tagNumber !== 2)
-    throw new Pkcs1ParseError("Invalid SPKI (invalid modulus)");
-  if (!publicExponent || publicExponent.tag.tagNumber !== 2)
-    throw new Pkcs1ParseError("Invalid SPKI (invalid publicExponent)");
-  return {
-    pkcs1: asn1ToArrayBuffer(parsed),
-    modulus: (asn1ToArrayBuffer(modulus, true).byteLength - 1) * 8,
-    publicExponent: parseInt(publicExponent.content() || "0")
-  };
-}
-var rsaASN1AlgorithmIdentifier = Uint8Array.from([
-  48,
-  13,
-  6,
-  9,
-  42,
-  134,
-  72,
-  134,
-  247,
-  13,
-  1,
-  1,
-  1,
-  // 1.2.840.113549.1.1.1
-  5,
-  0
-]);
-function genSpkiFromPkcs1(input) {
-  const { pkcs1 } = parsePkcs1(input);
-  const pkcsLength = genASN1Length(pkcs1.byteLength + 1);
-  const rootContent = Uint8Array.from([
-    ...rsaASN1AlgorithmIdentifier,
-    3,
-    ...pkcsLength,
-    // BIT STRING
-    0,
-    ...new Uint8Array(pkcs1)
-  ]);
-  return Uint8Array.from([
-    48,
-    ...genASN1Length(rootContent.length),
-    // SEQUENCE
-    ...rootContent
-  ]);
-}
-function parsePkcs1PrivateKey(input) {
-  try {
-    if (typeof input === "string" && /ENCRYPTED|Proc-Type:|DEK-Info:/.test(input))
-      throw new Error("Encrypted private keys are unsupported");
-    const decoded = decodePem(input);
-    const data = typeof decoded === "object" && "enc" in decoded ? decoded.enc : decoded;
-    const bytes = typeof data === "string" ? Uint8Array.from(data, (char) => char.charCodeAt(0)) : data instanceof Uint8Array ? data : data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data);
-    const fields = derSequence(bytes);
-    if (fields.length !== 9)
-      throw new Error("Expected nine two-prime RSA fields");
-    const version = unsignedDerInteger(fields[0], true);
-    if (version.length !== 1 || version[0] !== 0)
-      throw new Error("Only two-prime version 0 is supported");
-    for (const field of fields.slice(1))
-      unsignedDerInteger(field);
-    return { pkcs1: new Uint8Array(bytes).buffer };
-  } catch (error) {
-    throw new Pkcs1ParseError(`Invalid PKCS#1 private key: ${error.message}`);
-  }
-}
-function genPkcs8FromPkcs1(input) {
-  const { pkcs1 } = parsePkcs1PrivateKey(input);
-  const content = Uint8Array.from([
-    2,
-    1,
-    0,
-    ...rsaASN1AlgorithmIdentifier,
-    4,
-    ...genASN1Length(pkcs1.byteLength),
-    ...new Uint8Array(pkcs1)
-  ]);
-  return Uint8Array.from([48, ...genASN1Length(content.length), ...content]);
-}
-
-// src/pem/pss.ts
-var sha512Oid = [96, 134, 72, 1, 101, 3, 4, 2, 3];
-var mgf1Oid = [42, 134, 72, 134, 247, 13, 1, 1, 8];
-function matchesOid(element, expected) {
-  return element.tag === 6 && element.content.length === expected.length && element.content.every((byte, i) => byte === expected[i]);
-}
-function hash512(element) {
-  if (element.tag !== 48)
-    throw new Error("Invalid PSS hash identifier");
-  const parts = derChildren(element.content);
-  if (parts.length < 1 || parts.length > 2 || !matchesOid(parts[0], sha512Oid) || parts[1] && (parts[1].tag !== 5 || parts[1].content.length)) {
-    throw new Error("RSA-PSS requires SHA-512");
-  }
-}
-function validateRfc9421PssParameters(identifier) {
-  const parts = derSequence(identifier.encoded);
-  if (parts.length === 1)
-    return;
-  if (parts.length !== 2 || parts[1].tag !== 48)
-    throw new Error("Invalid RSA-PSS parameters");
-  let hash = false;
-  let mgf = false;
-  let saltLength = 20;
-  let lastTag = -1;
-  for (const field of derChildren(parts[1].content)) {
-    if (field.tag < 160 || field.tag > 163 || field.tag <= lastTag)
-      throw new Error("Invalid RSA-PSS parameter field");
-    lastTag = field.tag;
-    const values = derChildren(field.content);
-    if (values.length !== 1)
-      throw new Error("Invalid explicit RSA-PSS field");
-    if (field.tag === 160) {
-      hash512(values[0]);
-      hash = true;
-    }
-    if (field.tag === 161) {
-      const mgfParts = derSequence(values[0].encoded);
-      if (mgfParts.length !== 2 || !matchesOid(mgfParts[0], mgf1Oid))
-        throw new Error("RSA-PSS requires MGF1");
-      hash512(mgfParts[1]);
-      mgf = true;
-    }
-    if (field.tag === 162 || field.tag === 163) {
-      const integer = unsignedDerInteger(values[0], true);
-      if (integer.length > 2)
-        throw new Error("Unsupported RSA-PSS integer parameter");
-      const value = integer.reduce((total, byte) => total * 256 + byte, 0);
-      if (field.tag === 162)
-        saltLength = value;
-      else if (value !== 1)
-        throw new Error("Unsupported RSA-PSS trailer");
-    }
-  }
-  if (!hash || !mgf || saltLength > 64)
-    throw new Error("RSA-PSS key restrictions conflict with RFC 9421");
-}
-function normalizePssContainer(data, identifierIndex) {
-  const fields = derSequence(data);
-  validateRfc9421PssParameters(fields[identifierIndex]);
-  const content = fields.flatMap((field, i) => Array.from(i === identifierIndex ? rsaASN1AlgorithmIdentifier : field.encoded));
-  return Uint8Array.from([48, ...genASN1Length(content.length), ...content]).buffer;
-}
-
 // src/pem/spki.ts
-var import_asn1js2 = require("@lapo/asn1js");
+var import_asn1js3 = require("@lapo/asn1js");
 var import_hex = require("@lapo/asn1js/hex.js");
 var import_base64 = require("@lapo/asn1js/base64.js");
 var SpkiParseError = class extends Error {
@@ -1289,7 +1461,13 @@ function asn1ToArrayBuffer(asn1, contentOnly = false) {
 }
 var reHex = /^\s*(?:[0-9A-Fa-f][0-9A-Fa-f]\s*)+$/;
 function decodePem(input) {
+  if (typeof input === "string" && input.length > 4 * 1024 * 1024)
+    throw new SpkiParseError("Encoded key exceeds 4 MiB limit");
   const der = typeof input === "string" ? reHex.test(input) ? import_hex.Hex.decode(input) : import_base64.Base64.unarmor(input) : input;
+  const data = typeof der === "object" && "enc" in der ? der.enc : der;
+  const length = data instanceof ArrayBuffer ? data.byteLength : data.length;
+  if (length > 1024 * 1024)
+    throw new SpkiParseError("Decoded key exceeds 1 MiB limit");
   return der;
 }
 function parseAlgorithmIdentifier(input) {
@@ -1312,7 +1490,7 @@ function parseAlgorithmIdentifier(input) {
   };
 }
 function parseSpki(input) {
-  const parsed = import_asn1js2.ASN1.decode(decodePem(input));
+  const parsed = import_asn1js3.ASN1.decode(decodePem(input));
   if (!parsed.sub || parsed.sub.length === 0 || parsed.sub.length > 2)
     throw new SpkiParseError("Invalid SPKI (invalid sub)");
   const identifier = parseAlgorithmIdentifier(parsed.sub[0]);
@@ -1591,7 +1769,7 @@ function getMapWithoutUndefined(obj) {
 }
 
 // src/rfc9421/base.ts
-var sh = __toESM(require_dist(), 1);
+var sh2 = __toESM(require_dist(), 1);
 
 // src/rfc9421/sfv.ts
 var knownSfvHeaderTypeDictionary = {
@@ -1655,7 +1833,7 @@ var RFC9421SignatureBaseFactory = class {
    *
    * @param source request or response, must include 'signature-input' header
    *	If source is node response, it must include 'req' property.
-   * @param scheme optional, used when source request url starts with '/'
+   * @param scheme optional, used when source request url starts with '/'.
    * @param additionalSfvTypeDictionary additional SFV type dictionary
    * @param request optional, used when source is a browser Response
    * @param requiredComponents
@@ -1669,11 +1847,11 @@ var RFC9421SignatureBaseFactory = class {
       this.requiredComponents = requiredComponents.map((component) => {
         let item;
         if (component.startsWith('"')) {
-          item = sh.parseItem(component);
+          item = sh2.parseItem(component);
         } else {
           item = [component, /* @__PURE__ */ new Map()];
         }
-        return sh.serializeItem(item);
+        return sh2.serializeItem(item);
       });
     } else {
       this.requiredComponents = null;
@@ -1705,13 +1883,13 @@ var RFC9421SignatureBaseFactory = class {
     }
     if (!("signature-input" in this.requestHeaders))
       throw new Error("Signature-Input header is not found in request");
-    this.requestSignatureInput = sh.parseDictionary(canonicalizeHeaderValue(this.requestHeaders["signature-input"]));
+    this.requestSignatureInput = sh2.parseDictionary(canonicalizeHeaderValue(this.requestHeaders["signature-input"]));
     if (this.isResponse()) {
       if (!this.responseHeaders)
         throw new Error("responseHeaders is empty");
       if (!("signature-input" in this.responseHeaders))
         throw new Error("Signature-Input header is not found in response");
-      this.responseSignatureInput = sh.parseDictionary(canonicalizeHeaderValue(this.responseHeaders["signature-input"]));
+      this.responseSignatureInput = sh2.parseDictionary(canonicalizeHeaderValue(this.responseHeaders["signature-input"]));
     }
     this.sfvTypeDictionary = lcObjectKey(additionalSfvTypeDictionary);
     this.scheme = this.request.url.startsWith("/") ? scheme : new URL(this.request.url).protocol.replace(":", "");
@@ -1724,7 +1902,7 @@ var RFC9421SignatureBaseFactory = class {
   }
   get(name, paramsLike = /* @__PURE__ */ new Map()) {
     const params = getMap(paramsLike);
-    const componentIdentifier = sh.serializeItem([name, params]);
+    const componentIdentifier = sh2.serializeItem([name, params]);
     if (!name) {
       throw new Error(`Type is empty: ${componentIdentifier}`);
     }
@@ -1827,11 +2005,11 @@ var RFC9421SignatureBaseFactory = class {
         }
         const canonicalized = canonicalizeHeaderValue(rawValue);
         if (this.sfvTypeDictionary[name] === "dict") {
-          return sh.serializeDictionary(sh.parseDictionary(canonicalized));
+          return sh2.serializeDictionary(sh2.parseDictionary(canonicalized));
         } else if (this.sfvTypeDictionary[name] === "list") {
-          return sh.serializeList(sh.parseList(canonicalized));
+          return sh2.serializeList(sh2.parseList(canonicalized));
         } else if (["item", "bs", "int", "dec", "str", "bool", "token"].includes(this.sfvTypeDictionary[name])) {
-          return sh.serializeItem(sh.parseItem(canonicalized));
+          return sh2.serializeItem(sh2.parseItem(canonicalized));
         }
       }
       if (key) {
@@ -1842,15 +2020,15 @@ var RFC9421SignatureBaseFactory = class {
           throw new Error(`Key specified but value is not a string: ${componentIdentifier}`);
         }
         if (this.sfvTypeDictionary[name] === "dict") {
-          const dictionary = sh.parseDictionary(rawValue);
+          const dictionary = sh2.parseDictionary(rawValue);
           const value = dictionary.get(key);
           if (value === void 0) {
             throw new Error(`Key not found in dictionary: ${key} (${componentIdentifier})`);
           }
           if (Array.isArray(value[0])) {
-            return sh.serializeList([value]);
+            return sh2.serializeList([value]);
           } else {
-            return sh.serializeItem(value);
+            return sh2.serializeItem(value);
           }
         } else {
           throw new Error(`"${name}" is not dict: ${this.sfvTypeDictionary[name]} (${componentIdentifier})`);
@@ -1862,7 +2040,7 @@ var RFC9421SignatureBaseFactory = class {
             throw new Error(`Invalid header value type: ${typeof x}`);
           }
           return [
-            new sh.ByteSequence(
+            new sh2.ByteSequence(
               encodeArrayBufferToBase64(
                 textEncoder.encode(canonicalizeHeaderValue(x)).buffer
               )
@@ -1870,7 +2048,7 @@ var RFC9421SignatureBaseFactory = class {
             /* @__PURE__ */ new Map()
           ];
         });
-        return sh.serializeList(sequences);
+        return sh2.serializeList(sequences);
       }
       return canonicalizeHeaderValue(rawValue);
     }
@@ -1887,7 +2065,7 @@ var RFC9421SignatureBaseFactory = class {
       throw new Error(`label not found: ${label}`);
     }
     if (!Array.isArray(item[0])) {
-      throw new Error(`item is not InnerList: ${sh.serializeDictionary(/* @__PURE__ */ new Map([[label, item]]))}`);
+      throw new Error(`item is not InnerList: ${sh2.serializeDictionary(/* @__PURE__ */ new Map([[label, item]]))}`);
     }
     const results = /* @__PURE__ */ new Map();
     for (const component of item[0]) {
@@ -1900,7 +2078,7 @@ var RFC9421SignatureBaseFactory = class {
         }
       }
       component[0] = name;
-      const componentIdentifier = sh.serializeItem(component);
+      const componentIdentifier = sh2.serializeItem(component);
       if (results.has(componentIdentifier)) {
         throw new Error(`Duplicate key: ${name}`);
       }
@@ -1913,7 +2091,7 @@ var RFC9421SignatureBaseFactory = class {
         }
       }
     }
-    results.set('"@signature-params"', sh.serializeInnerList(item));
+    results.set('"@signature-params"', sh2.serializeInnerList(item));
     return Array.from(results.entries(), ([key, value]) => `${key}: ${value}`).join("\n");
   }
 };
@@ -1934,11 +2112,11 @@ function convertSignatureParamsDictionary(input) {
       ]
     );
   }
-  return sh.serializeDictionary(output);
+  return sh2.serializeDictionary(output);
 }
 
 // src/rfc9421/parse.ts
-var sh2 = __toESM(require_dist(), 1);
+var sh3 = __toESM(require_dist(), 1);
 var RFC9421SignatureParams = ["created", "expires", "nonce", "alg", "keyid", "tag"];
 function validateRFC9421SignatureInputParameters(input, options) {
   const labels = input.entries();
@@ -1977,10 +2155,10 @@ function parseSingleRFC9421Signature(label, factory, params, signature) {
     throw new SignatureInputLackedError(`label not found: ${label}`);
   const bareKeyid = params[1].get("keyid");
   return {
-    keyid: bareKeyid ? typeof bareKeyid === "string" ? bareKeyid : sh2.serializeBareItem(bareKeyid) : void 0,
+    keyid: bareKeyid ? typeof bareKeyid === "string" ? bareKeyid : sh3.serializeBareItem(bareKeyid) : void 0,
     base,
     signature: signature.toBase64(),
-    params: sh2.serializeInnerList(params),
+    params: sh3.serializeInnerList(params),
     algorithm: params[1].get("alg"),
     created: params[1].get("created"),
     expires: params[1].get("expires"),
@@ -1993,8 +2171,8 @@ function parseRFC9421RequestOrResponse(request, options, validated, errorLogger)
     validated = validateRequestAndGetSignatureHeader(request, options?.clockSkew);
   if (validated.signatureInput == null)
     throw new SignatureInputLackedError("signatureInput");
-  const signatureDictionary = sh2.parseDictionary(validated.signatureHeader);
-  const signatureInput = sh2.parseDictionary(validated.signatureInput);
+  const signatureDictionary = sh3.parseDictionary(validated.signatureHeader);
+  const signatureInput = sh3.parseDictionary(validated.signatureInput);
   const inputIsValid = validateRFC9421SignatureInputParameters(signatureInput, options);
   if (!inputIsValid)
     throw new Error("signatureInput");
@@ -2010,7 +2188,7 @@ function parseRFC9421RequestOrResponse(request, options, validated, errorLogger)
     const bs = signatureDictionary.get(label);
     if (!bs)
       throw new Error("signature not found");
-    if (!(bs[0] instanceof sh2.ByteSequence))
+    if (!(bs[0] instanceof sh3.ByteSequence))
       throw new Error("signature not ByteSequence");
     try {
       results.set(label, parseSingleRFC9421Signature(label, factory, params, bs[0]));
@@ -2318,12 +2496,6 @@ function parseRequestSignature(request, options) {
   throw new UnknownSignatureHeaderFormatError();
 }
 
-// src/shared/sign.ts
-async function genSignature(privateKey, signingString, defaults = defaultSignInfoDefaults) {
-  const signatureAB = await (await getWebcrypto()).subtle.sign(genAlgorithmForSignAndVerify(privateKey.algorithm, defaults.hash), privateKey, textEncoder.encode(signingString));
-  return encodeArrayBufferToBase64(signatureAB);
-}
-
 // src/keypair.ts
 async function exportPublicKeyPem(key) {
   const ab = await (await getWebcrypto()).subtle.exportKey("spki", key);
@@ -2473,7 +2645,7 @@ async function verifyRFC3230DigestHeader(request, rawBody, opts = {
 }
 
 // src/digest/digest-rfc9530.ts
-var sh3 = __toESM(require_dist(), 1);
+var sh4 = __toESM(require_dist(), 1);
 var import_rfc46485 = require("rfc4648");
 var RFC9530GenerateDigestHeaderError = class extends Error {
   constructor(message) {
@@ -2553,7 +2725,7 @@ async function genSingleRFC9530DigestHeader(body, hashAlgorithm) {
     [
       hashAlgorithm.toLowerCase(),
       [
-        new sh3.ByteSequence(
+        new sh4.ByteSequence(
           await createBase64Digest(body, convertHashAlgorithmFromRFC9530ToWebCrypto(hashAlgorithm)).then((data) => import_rfc46485.base64.stringify(new Uint8Array(data)))
         ),
         /* @__PURE__ */ new Map()
@@ -2601,7 +2773,7 @@ async function verifyRFC9530DigestHeader(request, rawBody, opts = {
   }
   let dictionary;
   try {
-    dictionary = Array.from(sh3.parseDictionary(contentDigestHeader), ([k, v]) => [k.toLowerCase(), v]);
+    dictionary = Array.from(sh4.parseDictionary(contentDigestHeader), ([k, v]) => [k.toLowerCase(), v]);
   } catch (e) {
     if (errorLogger)
       errorLogger("Invalid Digest header");
@@ -2633,7 +2805,7 @@ async function verifyRFC9530DigestHeader(request, rawBody, opts = {
       if (!acceptableAlgorithms.includes(algo.toLowerCase())) {
         return Promise.resolve(null);
       }
-      if (!(value instanceof sh3.ByteSequence)) {
+      if (!(value instanceof sh4.ByteSequence)) {
         return Promise.reject(new Error("Invalid dictionary value type"));
       }
       return createBase64Digest(rawBody, convertHashAlgorithmFromRFC9530ToWebCrypto(algo.toLowerCase())).then((hash) => compareUint8Array(import_rfc46485.base64.parse(value.toBase64()), new Uint8Array(hash)));
@@ -2698,51 +2870,6 @@ async function verifyDigestHeader(request, rawBody, opts = {
   return true;
 }
 
-// src/pem/pkcs8.ts
-var import_asn1js3 = require("@lapo/asn1js");
-var Pkcs8ParseError = class extends Error {
-  constructor(message) {
-    super(message);
-  }
-};
-function parsePkcs8(input) {
-  const parsed = import_asn1js3.ASN1.decode(decodePem(input));
-  if (!parsed.sub || parsed.sub.length < 3 || parsed.sub.length > 4)
-    throw new Pkcs8ParseError("Invalid PKCS#8 (invalid sub length)");
-  const version = parsed.sub[0];
-  if (!version || !version.tag || version.tag.tagNumber !== 2)
-    throw new Pkcs8ParseError("Invalid PKCS#8 (invalid version)");
-  const privateKeyAlgorithm = parseAlgorithmIdentifier(parsed.sub[1]);
-  if (privateKeyAlgorithm.algorithm.split("\n")[0] === "1.2.840.113549.1.1.10" && parsed.posEnd() !== parsed.stream.enc.length)
-    throw new Pkcs8ParseError("Trailing PSS key data");
-  const privateKey = parsed.sub[2];
-  if (!privateKey || !privateKey.tag || privateKey.tag.tagNumber !== 4)
-    throw new Pkcs8ParseError("Invalid PKCS#8 (invalid privateKey)");
-  const attributes = parsed.sub[3];
-  if (attributes) {
-    if (attributes.tag.tagNumber !== 49)
-      throw new Pkcs8ParseError("Invalid PKCS#8 (invalid attributes)");
-  }
-  return {
-    der: privateKeyAlgorithm.algorithm.split("\n")[0] === "1.2.840.113549.1.1.10" ? normalizePssContainer(new Uint8Array(asn1ToArrayBuffer(parsed)), 1) : asn1ToArrayBuffer(parsed),
-    ...privateKeyAlgorithm,
-    attributesRaw: attributes ? asn1ToArrayBuffer(attributes) : null
-  };
-}
-async function importPrivateKey(key, keyUsages = ["sign"], defaults = defaultSignInfoDefaults, extractable = false) {
-  if (typeof key === "object" && "kty" in key)
-    return importPrivateJwk(key, keyUsages, defaults, extractable);
-  key = key;
-  let parsedPrivateKey;
-  try {
-    parsedPrivateKey = parsePkcs8(key);
-  } catch {
-    parsedPrivateKey = parsePkcs8(genPkcs8FromPkcs1(key));
-  }
-  const importParams = genSignInfo(parsedPrivateKey, defaults);
-  return await (await getWebcrypto()).subtle.importKey("pkcs8", parsedPrivateKey.der, importParams, extractable, keyUsages);
-}
-
 // src/draft/sign.ts
 function getDraftAlgoString(keyAlgorithm, hashAlgorithm) {
   const verifyHash = () => {
@@ -2792,109 +2919,6 @@ async function signAsDraftToRequest(request, key, includeHeaders, opts) {
     signingString,
     signature,
     signatureHeader
-  };
-}
-
-// src/rfc9421/sign.ts
-var sh4 = __toESM(require_dist(), 1);
-function getRFC9421AlgoString(keyAlgorithm, hashAlgorithm) {
-  if (typeof keyAlgorithm === "string") {
-    keyAlgorithm = { name: keyAlgorithm };
-  }
-  if (keyAlgorithm.name === "RSA-PSS") {
-    if (hashAlgorithm !== "SHA-512" || keyAlgorithm.hash?.name !== "SHA-512")
-      throw new Error("RFC 9421 RSA-PSS requires SHA-512");
-    return "rsa-pss-sha512";
-  }
-  if (keyAlgorithm.name === "RSASSA-PKCS1-v1_5") {
-    if (hashAlgorithm === "SHA-256")
-      return "rsa-v1_5-sha256";
-    if (hashAlgorithm === "SHA-512")
-      return "rsa-v1_5-sha512";
-    throw new Error(`unsupported hash(RSASSA-PKCS1-v1_5): ${hashAlgorithm}`);
-  }
-  if (keyAlgorithm.name === "ECDSA") {
-    if (keyAlgorithm.namedCurve === "P-256" && hashAlgorithm === "SHA-256") {
-      return `ecdsa-p256-sha256`;
-    }
-    if (keyAlgorithm.namedCurve === "P-384" && hashAlgorithm === "SHA-384") {
-      return `ecdsa-p384-sha384`;
-    }
-    throw new Error(`unsupported curve(${keyAlgorithm.namedCurve}) or hash(${hashAlgorithm})`);
-  }
-  if (keyAlgorithm.name === "Ed25519") {
-    return `ed25519`;
-  }
-  throw new Error(`unsupported keyAlgorithm(${JSON.stringify(keyAlgorithm)}) or hash(${hashAlgorithm})`);
-}
-async function processSingleRFC9421SignSource(source) {
-  const defaults = "privateKeyJwk" in source.key ? getJwkSigningDefaults(source.key.privateKeyJwk, source.defaults) : source.defaults ?? defaultSignInfoDefaults;
-  const privateKey = "privateKey" in source.key ? source.key.privateKey : await importPrivateKey("privateKeyJwk" in source.key ? source.key.privateKeyJwk : source.key.privateKeyPem, ["sign"], defaults);
-  const alg = getRFC9421AlgoString(privateKey.algorithm, defaults.hash);
-  const created = source.created ?? Math.round(Date.now() / 1e3);
-  const expires = source.expiresAfter ? created + source.expiresAfter : void 0;
-  return {
-    key: privateKey,
-    params: [
-      source.identifiers,
-      {
-        keyid: source.key.keyId,
-        alg,
-        created,
-        expires,
-        nonce: source.nonce,
-        tag: source.tag
-      }
-    ]
-  };
-}
-async function signAsRFC9421ToRequestOrResponse(request, sources, signatureBaseOptions = {
-  scheme: "https",
-  additionalSfvTypeDictionary: {}
-}) {
-  const sourcesMap = getMap(sources);
-  const keys = /* @__PURE__ */ new Map();
-  const signingDefaults = /* @__PURE__ */ new Map();
-  const inputDictionary = /* @__PURE__ */ new Map();
-  for (const [label, source] of sourcesMap) {
-    const { key, params } = await processSingleRFC9421SignSource(source);
-    signingDefaults.set(label, "privateKeyJwk" in source.key ? getJwkSigningDefaults(source.key.privateKeyJwk, source.defaults) : source.defaults ?? defaultSignInfoDefaults);
-    keys.set(label, key);
-    inputDictionary.set(label, params);
-  }
-  const inputHeader = convertSignatureParamsDictionary(inputDictionary);
-  setHeaderToRequestOrResponse(request, "Signature-Input", inputHeader);
-  const factory = new RFC9421SignatureBaseFactory(
-    request,
-    signatureBaseOptions.scheme,
-    signatureBaseOptions.additionalSfvTypeDictionary,
-    signatureBaseOptions.request
-  );
-  const signaturesEntries = (factory.isRequest() ? factory.requestSignatureInput : factory.responseSignatureInput)?.keys();
-  if (!signaturesEntries)
-    throw new Error(`signaturesEntries is undefined`);
-  const signatureDictionary = /* @__PURE__ */ new Map();
-  const signatureBases = /* @__PURE__ */ new Map();
-  for (const label of signaturesEntries) {
-    const base = factory.generate(label);
-    const key = keys.get(label);
-    if (!key)
-      throw new Error(`key not found: ${label}`);
-    signatureBases.set(label, base);
-    signatureDictionary.set(label, [
-      new sh4.ByteSequence(
-        await genSignature(key, base, signingDefaults.get(label) ?? defaultSignInfoDefaults)
-      ),
-      /* @__PURE__ */ new Map()
-    ]);
-  }
-  const signatureHeader = sh4.serializeDictionary(signatureDictionary);
-  setHeaderToRequestOrResponse(request, "Signature", signatureHeader);
-  return {
-    inputHeader,
-    signatureHeader,
-    signatureDictionary,
-    signatureBases
   };
 }
 // Annotate the CommonJS export names for ESM import in node:
