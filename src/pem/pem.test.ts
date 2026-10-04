@@ -1,12 +1,10 @@
-import { importPublicKey, parsePublicKey, parseSpki } from './spki';
-import { genSpkiFromPkcs1, parsePkcs1 } from './pkcs1';
-import { importPrivateKey, parsePkcs8 } from './pkcs8';
+import { sign, createPublicKey } from 'node:crypto';
 import { rsa4096, ed25519 } from '../../test/keys';
 import { genEcKeyPair } from '../keypair';
 import { genSignInfo, getWebcrypto } from '../utils';
-
-import { sign, generateKeyPair } from 'node:crypto';
-import * as util from 'node:util';
+import { importPublicKey, parsePublicKey, parseSpki } from './spki';
+import { genSpkiFromPkcs1, parsePkcs1 } from './pkcs1';
+import { importPrivateKey, parsePkcs8 } from './pkcs8';
 
 const test_buffer = Buffer.from('test');
 
@@ -20,7 +18,7 @@ describe('spki', () => {
 		expect(importParams).toEqual({ name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' });
 
 		const publicKey = await (await getWebcrypto()).subtle.importKey('spki', parsed.der, importParams, true, ['verify']);
-		expect((publicKey?.algorithm as any).modulusLength).toBe(4096);
+		expect((publicKey.algorithm as any).modulusLength).toBe(4096);
 
 		const signed = sign('sha256', test_buffer, rsa4096.privateKey);
 
@@ -37,7 +35,7 @@ describe('spki', () => {
 		expect(importParams).toEqual({ name: 'Ed25519' });
 
 		const publicKey = await (await getWebcrypto()).subtle.importKey('spki', parsed.der, importParams, true, ['verify']);
-		expect((publicKey?.algorithm as any).name).toBe('Ed25519');
+		expect((publicKey.algorithm as any).name).toBe('Ed25519');
 
 		const signed = sign(null, test_buffer, ed25519.privateKey);
 
@@ -55,7 +53,7 @@ describe('spki', () => {
 		expect(importParams).toEqual({ name: 'ECDSA', namedCurve: 'P-256', hash: 'SHA-256' });
 
 		const publicKey = await (await getWebcrypto()).subtle.importKey('spki', parsed.der, importParams, true, ['verify']);
-		expect((publicKey?.algorithm as any).name).toBe('ECDSA');
+		expect((publicKey.algorithm as any).name).toBe('ECDSA');
 
 		const signed = sign('sha256', test_buffer, { key: keyPair.privateKey, dsaEncoding: 'ieee-p1363' });
 
@@ -71,19 +69,12 @@ describe('spki', () => {
 describe('pkcs1', () => {
 	test('pkcs1', async () => {
 		const modulusLength = 4096;
-		const kp = await util.promisify(generateKeyPair)('rsa', {
-			modulusLength,
-			publicKeyEncoding: {
-				type: 'pkcs1',
-				format: 'pem'
-			},
-			privateKeyEncoding: {
-				type: 'pkcs8',
-				format: 'pem',
-				cipher: undefined,
-				passphrase: undefined
-			}
-		});
+		// This checks conversion, so reuse the independent 4096-bit fixture rather
+		// than letting random prime generation exceed Jest's CI time budget.
+		const kp = {
+			publicKey: createPublicKey(rsa4096.publicKey).export({ type: 'pkcs1', format: 'pem' }),
+			privateKey: rsa4096.privateKey,
+		};
 
 		const pkcs1 = parsePkcs1(kp.publicKey);
 		expect(pkcs1.modulus).toBe(modulusLength); // BigInt have 00 prefix
@@ -96,7 +87,7 @@ describe('pkcs1', () => {
 		const signed = sign('sha256', test_buffer, kp.privateKey);
 
 		const publicKey = await (await getWebcrypto()).subtle.importKey('spki', spki, genSignInfo(parsed), true, ['verify']);
-		expect((publicKey?.algorithm as any).modulusLength).toBe(4096);
+		expect((publicKey.algorithm as any).modulusLength).toBe(4096);
 
 		const verify = await (await getWebcrypto()).subtle.verify(genSignInfo(parsed), publicKey, signed, test_buffer);
 		expect(verify).toBe(true);
