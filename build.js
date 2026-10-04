@@ -7,7 +7,7 @@ const __dirname = new URL('.', import.meta.url).pathname;
 /** @type {esbuild.BuildOptions} */
 const buildOptionsBase = {
 	platform: 'node',
-	entryPoints: [ `${__dirname}/src/index.ts` ],
+	entryPoints: [ `${__dirname}/src/index.ts`, `${__dirname}/src/node/slacc.ts` ],
 	bundle: true,
 	treeShaking: true,
 	minify: false,

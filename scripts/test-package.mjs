@@ -41,9 +41,9 @@ for (const method of ['GET', 'POST']) {
 ${hasNodeAdapter ? `
 assert.equal(typeof adapter.createSlaccSigningKey,'function');
 assert.equal(typeof adapter.createSlaccVerifier,'function');
-const {sign}=await import('node:crypto');
-const legacy={RsaKeyPair:{fromPem(input){return {sign(payload,callback){callback(null,sign('sha256',payload,input));}};}}};
-const key=await adapter.createLegacySlaccWebCryptoSigningKey(legacy,{keyId:'actor',version:'draft',privateKey:pem});
+const {sign,createPrivateKey,createPublicKey}=await import('node:crypto');
+const binding={SignatureAlgorithmIdentifier:{Rsa2048_8192:'Rsa2048_8192',Eddsa:'Eddsa'},Signer:{fromPkcs8Der(suite,der){const privateKey=createPrivateKey({key:der,format:'der',type:'pkcs8'});return {publicKey:createPublicKey(privateKey).export({type:'pkcs1',format:'der'}),signRaw(payload,callback){callback(null,sign('sha256',payload,privateKey));}};}}};
+const key=adapter.createSlaccSigningKey(binding,{keyId:'actor',version:'draft',algorithm:'rsa-v1_5-sha256',privateKey:pem});
 const request={method:'GET',url:'https://example.com/path?q=1',headers:{host:'example.com'}};
 await api.signAsDraftToRequest(request,key,['(request-target)','host']);
 assert.ok(await api.verifyParsedSignature(api.parseRequestSignature(request),publicPem));
@@ -52,7 +52,7 @@ assert.ok(await api.verifyParsedSignature(api.parseRequestSignature(request),pub
   writeFileSync(join(consumer, 'esm.mjs'), `import assert from 'node:assert/strict';\nimport * as api from '${metadata.name}';\n${hasNodeAdapter ? `import * as adapter from '${metadata.name}/node/slacc';` : ''}\n${body}`);
   writeFileSync(join(consumer, 'commonjs.cjs'), `const assert=require('node:assert/strict');\nconst api=require('${metadata.name}');\n${hasNodeAdapter ? `const adapter=require('${metadata.name}/node/slacc');` : ''}\n(async()=>{${body}})().catch(error=>{console.error(error);process.exitCode=1;});`);
   for (const name of ['esm.mjs', 'commonjs.cjs']) execFileSync(process.execPath, [join(consumer, name)], { stdio: 'inherit' });
-  writeFileSync(join(consumer, 'types.ts'), `import {signAsDraftToRequest, type CustomSigningKey} from '${metadata.name}';\n${hasNodeAdapter ? `import {createLegacySlaccWebCryptoSigningKey} from '${metadata.name}/node/slacc';\nvoid createLegacySlaccWebCryptoSigningKey;` : ''}\ndeclare const key:CustomSigningKey;\nvoid signAsDraftToRequest({method:'GET',url:'https://example.com/',headers:{}},key,['(request-target)']);`);
+  writeFileSync(join(consumer, 'types.ts'), `import {signAsDraftToRequest, type CustomSigningKey} from '${metadata.name}';\n${hasNodeAdapter ? `import {createSlaccSigningKey} from '${metadata.name}/node/slacc';\nvoid createSlaccSigningKey;` : ''}\ndeclare const key:CustomSigningKey;\nvoid signAsDraftToRequest({method:'GET',url:'https://example.com/',headers:{}},key,['(request-target)']);`);
   execFileSync(process.execPath, [join(root, 'node_modules/typescript/bin/tsc'), '--noEmit', '--strict', '--skipLibCheck', '--target', 'es2020', '--module', 'nodenext', '--moduleResolution', 'nodenext', '--lib', 'esnext,dom,dom.iterable', join(consumer, 'types.ts')], { stdio: 'inherit' });
   console.log(`Packed artifact passed ESM/CommonJS signing and package-export types${hasNodeAdapter ? ', including Node slacc subpath' : ''}`);
 } finally {
