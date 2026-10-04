@@ -1,5 +1,6 @@
 import type { IncomingRequest, PrivateKey, SignatureHashAlgorithmUpperSnake } from '../types.js';
 import { type SignInfoDefaults, defaultSignInfoDefaults } from '../utils.js';
+import { getJwkSigningDefaults } from '../pem/jwk.js';
 import { importPrivateKey } from '../pem/pkcs8.js';
 import { keyHashAlgosForDraftEncofing } from './const.js';
 import { genDraftSigningString } from './string.js';
@@ -57,7 +58,8 @@ export function genDraftSignatureHeader(includeHeaders: string[], keyId: string,
  * @param opts
  * @returns result object
  */
-export async function signAsDraftToRequest(request: IncomingRequest, key: PrivateKey, includeHeaders: string[], opts: SignInfoDefaults = defaultSignInfoDefaults) {
+export async function signAsDraftToRequest(request: IncomingRequest, key: PrivateKey, includeHeaders: string[], opts?: SignInfoDefaults) {
+	opts = 'privateKeyJwk' in key ? getJwkSigningDefaults(key.privateKeyJwk, opts) : opts ?? defaultSignInfoDefaults;
 	// hashAlgorithm is old name
 	if ((opts as any).hashAlgorithm) {
 		opts.hash = (opts as any).hashAlgorithm;

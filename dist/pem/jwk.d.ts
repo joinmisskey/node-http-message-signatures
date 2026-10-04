@@ -14,3 +14,5 @@ export declare function importSignatureJwk(jwk: JsonWebKey, privateKey: boolean,
 }>;
 export declare function importPublicJwk(jwk: JsonWebKey, keyUsages?: KeyUsage[], defaults?: SignInfoDefaults, extractable?: boolean): Promise<CryptoKey>;
 export declare function importPrivateJwk(jwk: JsonWebKey, keyUsages?: KeyUsage[], defaults?: SignInfoDefaults, extractable?: boolean): Promise<CryptoKey>;
+/** Declared JWK algorithms determine omitted signing defaults; explicit conflicts fail. */
+export declare function getJwkSigningDefaults(jwk: JsonWebKey, defaults?: SignInfoDefaults): SignInfoDefaults;
