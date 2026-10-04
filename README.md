@@ -5,7 +5,11 @@ Implementation of [HTTP Signatures "Draft", RFC 9421](https://datatracker.ietf.o
 
 We initially started working on it with the intention of using it in Node.js, but since we rewrote it to Web Crypto API, it may also work in browsers and edge workers.
 
-It is created for Misskey's ActivityPub implementation.
+It was created for Misskey's ActivityPub implementation by the original authors, including mei23 and tamaina.
+
+This fork is maintained at [joinmisskey/node-http-message-signatures](https://github.com/joinmisskey/node-http-message-signatures), based on [misskey-dev/node-http-message-signatures](https://github.com/misskey-dev/node-http-message-signatures). The npm package name remains `@misskey-dev/node-http-message-signatures`. The original MIT license and copyright notices are retained; this maintenance fork does not imply endorsement by the original authors or the Misskey organization.
+
+See [RELEASING.md](./RELEASING.md) for build, test, and release preparation.
 
 ## Context
 ### HTTP Signatures "Draft" and RFC 9421
@@ -81,6 +85,10 @@ npm install @misskey-dev/node-http-message-signatures
 Parse and verify in fastify web server, implements ActivityPub inbox
 
 See [the usage (parse-and-verify-fastify.ts)](./test/unit/readme-usage/parse-and-verify-fastify.ts)
+
+### Draft request targets
+
+Draft signing and verification accept absolute URLs and origin-form request targets. For example, `https://example.com:8443/inbox?foo=bar#fragment` signs `(request-target): post /inbox?foo=bar` for a POST request. Queries retain their encoding and order, including an explicitly empty `?`; fragments are excluded. Include the actual `Host` header (such as `example.com:8443`) when signing `host`.
 
 ### Sign and Post
 

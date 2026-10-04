@@ -25,7 +25,16 @@ export function genDraftSigningString(
 
 	for (const key of includeHeaders.map(x => x.toLowerCase())) {
 		if (key === '(request-target)') {
-			results.push(`(request-target): ${source.method.toLowerCase()} ${source.url.startsWith('/') ? source.url : new URL(source.url).pathname}`);
+			let requestTarget: string;
+			if (source.url.startsWith('/')) {
+				requestTarget = source.url.split('#', 1)[0];
+			} else {
+				const url = new URL(source.url);
+				// URL.search omits an explicitly empty query; retain its delimiter.
+				const search = url.search || (url.href.split('#', 1)[0].endsWith('?') ? '?' : '');
+				requestTarget = url.pathname + search;
+			}
+			results.push(`(request-target): ${source.method.toLowerCase()} ${requestTarget}`);
 		} else if (key === '(keyid)') {
 			results.push(`(keyid): ${additional?.keyId}`);
 		} else if (key === '(algorithm)') {
