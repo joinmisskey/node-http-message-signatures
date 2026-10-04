@@ -1,5 +1,6 @@
 // Shared native-Web-Crypto regressions for Jest, Chrome main thread and workers.
 export const verificationCaseNames = [
+  'implicit algorithm allowlist is respected',
   'P-256 PEM and CryptoKey', 'P-384 PEM and CryptoKey', 'label and keyid selection',
   'same-algorithm fallback examines every PEM key', 'same-algorithm fallback examines every CryptoKey',
   'mixed and malformed fallback candidates', 'wrong curve and algorithm are rejected',
@@ -26,7 +27,7 @@ export async function createVerificationCases(api, crypto) {
   for (const [name, pair] of Object.entries({ ...pairs, wrong, rsa })) pem[name] = await api.exportPublicKeyPem(pair.publicKey);
 
   async function entry(pair, algorithm, hash, keyid, label = 'sig') {
-    const params = `("@method");alg="${algorithm}"${keyid === undefined ? '' : `;keyid="${keyid}"`}`;
+    const params = `("@method")${algorithm === undefined ? '' : `;alg="${algorithm}"`}${keyid === undefined ? '' : `;keyid="${keyid}"`}`;
     const base = `"@method": POST\n"@signature-params": ${params}`;
     // Sign independently of the library's algorithm/default selection.
     const bytes = await crypto.subtle.sign({ name: pair.privateKey.algorithm.name, hash }, pair.privateKey, new TextEncoder().encode(base));
@@ -173,6 +174,19 @@ export async function createVerificationCases(api, crypto) {
     const request = { method: 'GET', url: 'https://example.com/multikey?q=1', headers: { Host: 'example.com' } };
     await api.signAsRFC9421ToRequestOrResponse(request, { multi: { key: { keyId: 'multi', privateKey: pair.privateKey }, identifiers: ['@method', '@target-uri'] } });
     assert(await api.verifyParsedSignature(api.parseRequestSignature(request), 'z' + encoded), 'Multikey verification failed');
+  };
+  cases['implicit algorithm allowlist is respected'] = async () => {
+    const implicit = await entry(rsa, undefined, 'SHA-256', 'actor-rsa', 'implicit');
+    for (const verifyAll of [false, true]) {
+      for (const key of [pem.rsa, new Map([['actor-rsa', rsa.publicKey]])]) {
+        await check([implicit], key, false, { verifyAll, algorithms: ['ed25519'] });
+        await check([implicit], key, true, { verifyAll, algorithms: ['rsa-v1_5-sha256'] });
+      }
+    }
+    const selected = ['selected', p256[1]];
+    const keys = new Map([['actor-rsa', pem.rsa], ['selected', pem['P-256']]]);
+    await check([implicit, selected], keys, true, { verifyAll: true, algorithms: ['ecdsa-p256-sha256'] });
+    await check([implicit], new Map([['actor-rsa', pem.rsa]]), false, { verifyAll: true, algorithms: ['ed25519'] });
   };
   return cases;
 }
