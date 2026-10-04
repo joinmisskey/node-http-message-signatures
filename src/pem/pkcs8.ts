@@ -1,3 +1,6 @@
+import { importPrivateJwk } from './jwk.js';
+import { normalizePssContainer } from './pss.js';
+import { genPkcs8FromPkcs1 } from './pkcs1.js';
 import { ASN1 } from '@lapo/asn1js';
 import { ParsedAlgorithmIdentifierBase, asn1ToArrayBuffer, decodePem, parseAlgorithmIdentifier } from './spki.js';
 import { SignInfoDefaults, defaultSignInfoDefaults, genSignInfo, getWebcrypto } from '../utils.js';
@@ -36,6 +39,7 @@ export function parsePkcs8(input: ASN1.StreamOrBinary): ParsedPkcs8 {
 	const version = parsed.sub[0];
 	if (!version || !version.tag || version.tag.tagNumber !== 0x02) throw new Pkcs8ParseError('Invalid PKCS#8 (invalid version)');
 	const privateKeyAlgorithm = parseAlgorithmIdentifier(parsed.sub[1]);
+	if (privateKeyAlgorithm.algorithm.split('\n')[0] === '1.2.840.113549.1.1.10' && parsed.posEnd() !== parsed.stream.enc.length) throw new Pkcs8ParseError('Trailing PSS key data');
 	const privateKey = parsed.sub[2];
 	if (!privateKey || !privateKey.tag || privateKey.tag.tagNumber !== 0x04) throw new Pkcs8ParseError('Invalid PKCS#8 (invalid privateKey)');
 	const attributes = parsed.sub[3];
@@ -44,21 +48,29 @@ export function parsePkcs8(input: ASN1.StreamOrBinary): ParsedPkcs8 {
 	}
 
 	return {
-		der: asn1ToArrayBuffer(parsed),
+		der: privateKeyAlgorithm.algorithm.split('\n')[0] === '1.2.840.113549.1.1.10'
+			? normalizePssContainer(new Uint8Array(asn1ToArrayBuffer(parsed)), 1) : asn1ToArrayBuffer(parsed),
 		...privateKeyAlgorithm,
 		attributesRaw: attributes ? asn1ToArrayBuffer(attributes) : null,
 	};
 }
 /**
  * Parse private key and run `crypto.subtle.importKey`
- * (only supports PKCS#8)
+ * (supports unencrypted PKCS#8 and two-prime PKCS#1 RSA)
  * @param key string or ArrayBuffer
  * @param keyUsages e.g. ['verify']
  * @param defaults
  * @returns CryptoKey
  */
-export async function importPrivateKey(key: ASN1.StreamOrBinary, keyUsages: KeyUsage[] = ['sign'], defaults: SignInfoDefaults = defaultSignInfoDefaults, extractable = false) {
-	const parsedPrivateKey = parsePkcs8(key);
+export async function importPrivateKey(key: ASN1.StreamOrBinary | JsonWebKey, keyUsages: KeyUsage[] = ['sign'], defaults: SignInfoDefaults = defaultSignInfoDefaults, extractable = false) {
+	if (typeof key === 'object' && 'kty' in key) return importPrivateJwk(key, keyUsages, defaults, extractable);
+	key = key as ASN1.StreamOrBinary;
+	let parsedPrivateKey: ParsedPkcs8;
+	try {
+		parsedPrivateKey = parsePkcs8(key);
+	} catch {
+		parsedPrivateKey = parsePkcs8(genPkcs8FromPkcs1(key));
+	}
 	const importParams = genSignInfo(parsedPrivateKey, defaults);
 	return await (await getWebcrypto()).subtle.importKey('pkcs8', parsedPrivateKey.der, importParams, extractable, keyUsages);
 }

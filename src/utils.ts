@@ -195,6 +195,8 @@ export class KeyValidationError extends Error {
 export type SignInfoDefaults = {
 	hash: SignatureHashAlgorithmUpperSnake,
 	ec: 'DSA' | 'DH',
+	/** Explicit RSA import/signing mode; the historical v1_5 default is retained. */
+	rsa?: 'RSASSA-PKCS1-v1_5' | 'RSA-PSS',
 };
 
 export const defaultSignInfoDefaults: SignInfoDefaults = {
@@ -208,6 +210,10 @@ export function genSignInfo(
 ): SignInfo {
 	const algorithm = getPublicKeyAlgorithmNameFromOid(parsed.algorithm);
 	if (!algorithm) throw new KeyValidationError('Unknown algorithm');
+	if (algorithm === 'RSA-PSS' || (algorithm === 'RSASSA-PKCS1-v1_5' && defaults.rsa === 'RSA-PSS')) {
+		if (defaults.hash !== 'SHA-512') throw new KeyValidationError('RFC 9421 RSA-PSS requires SHA-512');
+		return { name: 'RSA-PSS', hash: 'SHA-512', saltLength: 64 };
+	}
 	if (algorithm === 'RSASSA-PKCS1-v1_5') {
 		return {
 			name: 'RSASSA-PKCS1-v1_5',
@@ -236,10 +242,11 @@ export function genSignInfo(
  * because algorithm of ECDSA and ECDH does not have hash property.
  */
 export function genAlgorithmForSignAndVerify(keyAlgorithm: KeyAlgorithm, hashAlgorithm: SignatureHashAlgorithmUpperSnake) {
-	return {
-		hash: hashAlgorithm,
-		...keyAlgorithm,
-	};
+	if (keyAlgorithm.name === 'RSA-PSS') {
+		if (hashAlgorithm !== 'SHA-512' || (keyAlgorithm as RsaHashedKeyAlgorithm).hash?.name !== 'SHA-512') throw new KeyValidationError('RFC 9421 RSA-PSS requires SHA-512');
+		return { name: 'RSA-PSS', hash: 'SHA-512', saltLength: 64 };
+	}
+	return { hash: hashAlgorithm, ...keyAlgorithm };
 }
 
 export function splitPer64Chars(str: string): string[] {

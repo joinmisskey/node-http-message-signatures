@@ -88,7 +88,9 @@ export type PrivateKeyWithCryptoKey = {
 	privateKey: CryptoKey;
 	keyId: string;
 };
-export type PrivateKey = PrivateKeyWithPem | PrivateKeyWithCryptoKey;
+export type PrivateKeyWithJwk = { privateKeyJwk: JsonWebKey; keyId: string };
+export type PrivateKey = PrivateKeyWithPem | PrivateKeyWithCryptoKey | PrivateKeyWithJwk;
+export type PublicKeySource = string | CryptoKey | JsonWebKey;
 
 // Compatible with CryptoKey.algorithm.name
 export type KeyAlgorithmName = 'RSA-PSS' | 'RSASSA-PKCS1-v1_5' | 'DSA' | 'DH' | 'KEA' | 'EC' | 'Ed25519' | 'Ed448';
@@ -198,3 +200,24 @@ export type ParsedRFC9421Signature = {
 
 export type ParsedSignature = ParsedDraftSignature | ParsedRFC9421Signature;
 //#endregion
+
+/** Supported signing operations; ECDH is deliberately excluded. */
+export type SignatureOperation = SignInfoRSA | (SignInfoRSAPSS & { hash: 'SHA-512'; saltLength: 64 }) | (SignInfoEC & { name: 'ECDSA' }) | SignInfoEd25519 | SignInfoEd448;
+export type SignatureSignerContext = {
+	version: 'draft' | 'rfc9421'; label?: string; keyId: string;
+	algorithm: SignatureOperation; signatureAlgorithm: string; signingString: string; key?: CryptoKey;
+};
+export type SignatureVerifierContext = Omit<SignatureSignerContext, 'keyId'> & { keyId?: string; signature: Uint8Array };
+export type SignatureSigner = (context: SignatureSignerContext) => Promise<Uint8Array>;
+export type SignatureVerifier = (context: SignatureVerifierContext) => Promise<boolean>;
+export type KeyResolver = (context: { version: 'draft' | 'rfc9421'; label?: string; keyId?: string; algorithm?: string }) => Promise<PublicKeySource | readonly PublicKeySource[] | undefined>;
+/** Explicit keyless backend source; operation and wire identifier must agree. */
+export type CustomSigningKey = {
+	keyId: string; algorithm: SignatureOperation;
+	signatureAlgorithm: DraftSignatureAlgorithm | RFC9421SignatureAlgorithm;
+	signer: SignatureSigner; privateKey?: CryptoKey;
+};
+export type VerificationOptions = {
+	keys?: PublicKeySource | Map<string, PublicKeySource>;
+	resolveKey?: KeyResolver; verifier?: SignatureVerifier; logger?: (message: any) => any;
+};

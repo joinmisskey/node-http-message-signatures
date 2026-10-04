@@ -1,5 +1,6 @@
 import { parseRFC9421RequestOrResponse } from 'src/rfc9421/parse.js';
 import { parseDraftRequest } from '../draft/parse.js';
+import type { SFVHeaderTypeDictionary } from '../rfc9421/sfv.js';
 import type { ClockSkewSettings, IncomingRequest, OutgoingResponse, ParsedSignature } from '../types.js';
 import { canonicalizeHeaderValue, collectHeaders, isBrowserResponse } from '../utils.js';
 
@@ -19,6 +20,8 @@ export type RequestParseOptions = {
 		rfc9421?: string[];
 	};
 	clockSkew?: ClockSkewSettings;
+	/** Additional Structured Field types used when parsing RFC 9421 components. */
+	additionalSfvTypeDictionary?: SFVHeaderTypeDictionary;
 };
 
 //#region parse errors

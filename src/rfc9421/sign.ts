@@ -1,13 +1,14 @@
-import type { IncomingRequest, MapLikeObj, OutgoingResponse, PrivateKey, SFVSignatureParamsForInput, SignatureHashAlgorithmUpperSnake } from '../types.js';
-import { type SignInfoDefaults, defaultSignInfoDefaults, setHeaderToRequestOrResponse, getMap } from '../utils.js';
-import { importPrivateKey } from '../pem/pkcs8.js';
+import * as sh from 'structured-headers';
+import { type SignInfoDefaults, setHeaderToRequestOrResponse, getMap } from '../utils.js';
+import { prepareSigningKey } from '../shared/backend.js';
+import { encodeArrayBufferToBase64 } from '../utils.js';
 import { RFC9421SignatureBaseFactory, convertSignatureParamsDictionary } from './base.js';
 import { SFVHeaderTypeDictionary } from './sfv.js';
-import * as sh from 'structured-headers';
-import { genSignature } from '../shared/sign.js';
+import type { IncomingRequest, MapLikeObj, OutgoingResponse, PrivateKey, CustomSigningKey, SignatureSigner, SFVSignatureParamsForInput, SignatureHashAlgorithmUpperSnake } from '../types.js';
 
 export type RFC9421SignSource = {
-	key: PrivateKey;
+	key: PrivateKey | CustomSigningKey;
+	signer?: SignatureSigner;
 	defaults?: SignInfoDefaults;
 	/**
 	 * @examples
@@ -54,6 +55,10 @@ export function getRFC9421AlgoString(keyAlgorithm: CryptoKey['algorithm'], hashA
 		keyAlgorithm = { name: keyAlgorithm };
 	}
 
+	if (keyAlgorithm.name === 'RSA-PSS') {
+		if (hashAlgorithm !== 'SHA-512' || (keyAlgorithm as RsaHashedKeyAlgorithm).hash.name !== 'SHA-512') throw new Error('RFC 9421 RSA-PSS requires SHA-512');
+		return 'rsa-pss-sha512';
+	}
 	if (keyAlgorithm.name === 'RSASSA-PKCS1-v1_5') {
 		if (hashAlgorithm === 'SHA-256') return 'rsa-v1_5-sha256';
 		if (hashAlgorithm === 'SHA-512') return 'rsa-v1_5-sha512';
@@ -61,30 +66,29 @@ export function getRFC9421AlgoString(keyAlgorithm: CryptoKey['algorithm'], hashA
 	}
 	if (keyAlgorithm.name === 'ECDSA') {
 		if ((keyAlgorithm as EcKeyAlgorithm).namedCurve === 'P-256' && hashAlgorithm === 'SHA-256') {
-			return `ecdsa-p256-sha256`;
+			return 'ecdsa-p256-sha256';
 		}
 		if ((keyAlgorithm as EcKeyAlgorithm).namedCurve === 'P-384' && hashAlgorithm === 'SHA-384') {
-			return `ecdsa-p384-sha384`;
+			return 'ecdsa-p384-sha384';
 		}
 		throw new Error(`unsupported curve(${(keyAlgorithm as any).namedCurve}) or hash(${hashAlgorithm})`);
 	}
 	if (keyAlgorithm.name === 'Ed25519') {
-		return `ed25519`; // Joyent/@peertube/http-signatureではこう指定する必要がある
+		return 'ed25519'; // Joyent/@peertube/http-signatureではこう指定する必要がある
 	}
 	throw new Error(`unsupported keyAlgorithm(${JSON.stringify(keyAlgorithm)}) or hash(${hashAlgorithm})`);
 }
 
+export function processSingleRFC9421SignSource(source: RFC9421SignSource & { key: PrivateKey }): Promise<{ key: CryptoKey; params: SFVSignatureParamsForInput }>;
+export function processSingleRFC9421SignSource(source: RFC9421SignSource): Promise<{ key: CryptoKey | undefined; params: SFVSignatureParamsForInput }>;
 export async function processSingleRFC9421SignSource(source: RFC9421SignSource) {
-	const defaults = source.defaults ?? defaultSignInfoDefaults;
-	const privateKey = 'privateKey' in source.key ?
-		source.key.privateKey
-		: await importPrivateKey(source.key.privateKeyPem, ['sign'], defaults);
-	const alg = getRFC9421AlgoString(privateKey.algorithm, defaults.hash);
+	const prepared = await prepareSigningKey('rfc9421', source.key, source.defaults, source.signer);
+	const alg = prepared.wire;
 	const created = source.created ?? Math.round(Date.now() / 1000);
 	const expires = source.expiresAfter ? created + source.expiresAfter : undefined;
 
 	return {
-		key: privateKey,
+		key: prepared.key,
 		params: [
 			source.identifiers,
 			{
@@ -115,17 +119,20 @@ export async function signAsRFC9421ToRequestOrResponse(
 		scheme?: string;
 		additionalSfvTypeDictionary?: SFVHeaderTypeDictionary;
 		request?: Request;
+		signer?: SignatureSigner;
 	} = {
-			scheme: 'https',
-			additionalSfvTypeDictionary: {}
-		},
+		scheme: 'https',
+		additionalSfvTypeDictionary: {},
+	},
 ) {
 	const sourcesMap = getMap(sources) as Map<string, RFC9421SignSource>;
-	const keys = new Map<string, CryptoKey>();
+	const preparedKeys = new Map<string, Awaited<ReturnType<typeof prepareSigningKey>>>();
 	const inputDictionary = new Map<string, SFVSignatureParamsForInput>();
 	for (const [label, source] of sourcesMap) {
-		const { key, params } = await processSingleRFC9421SignSource(source);
-		keys.set(label, key);
+		const prepared = await prepareSigningKey('rfc9421', source.key, source.defaults, source.signer ?? ('signer' in source.key ? source.key.signer : signatureBaseOptions.signer));
+		preparedKeys.set(label, prepared);
+		const created = source.created ?? Math.round(Date.now() / 1000);
+		const params: SFVSignatureParamsForInput = [source.identifiers, { keyid: source.key.keyId, alg: prepared.wire, created, ...(source.expiresAfter ? { expires: created + source.expiresAfter } : {}), ...(source.nonce !== undefined ? { nonce: source.nonce } : {}), ...(source.tag !== undefined ? { tag: source.tag } : {}) }];
 		inputDictionary.set(label, params);
 	}
 
@@ -136,22 +143,24 @@ export async function signAsRFC9421ToRequestOrResponse(
 		request,
 		signatureBaseOptions.scheme,
 		signatureBaseOptions.additionalSfvTypeDictionary,
-		signatureBaseOptions.request
+		signatureBaseOptions.request,
 	);
 
-	const signaturesEntries = (factory.isRequest() ? factory.requestSignatureInput : factory.responseSignatureInput!)?.keys();
-	if (!signaturesEntries) throw new Error(`signaturesEntries is undefined`);
+	const signaturesEntries = (factory.isRequest() ? factory.requestSignatureInput : factory.responseSignatureInput!).keys();
+	if (!signaturesEntries) throw new Error('signaturesEntries is undefined');
 
 	const signatureDictionary = new Map<string, [sh.ByteSequence, Map<any, any>]>();
 	const signatureBases = new Map<string, string>();
 	for (const label of signaturesEntries) {
 		const base = factory.generate(label);
-		const key = keys.get(label);
-		if (!key) throw new Error(`key not found: ${label}`);
+		const prepared = preparedKeys.get(label);
+		if (!prepared) throw new Error(`key not found: ${label}`);
+		const bytes = await prepared.signer({ version: 'rfc9421', label, keyId: sourcesMap.get(label)!.key.keyId, algorithm: prepared.operation, signatureAlgorithm: prepared.wire, signingString: base, key: prepared.key });
+		if (!(bytes instanceof Uint8Array)) throw new Error('Signer must return Uint8Array');
 		signatureBases.set(label, base);
 		signatureDictionary.set(label, [
 			new sh.ByteSequence(
-				await genSignature(key, base, sourcesMap.get(label)?.defaults ?? defaultSignInfoDefaults)
+				encodeArrayBufferToBase64(new Uint8Array(bytes).buffer),
 			),
 			new Map(),
 		]);

@@ -1,159 +1,78 @@
-import { ParsedRFC9421Signature, ParsedRFC9421SignatureValueWithBase, RFC9421SignatureAlgorithm } from "../types.js";
-import { parseAndImportPublicKey } from "../pem/spki.js";
-import { parseSignInfo } from "../shared/verify.js";
-import { getWebcrypto } from "../utils.js";
-import { base64 } from "rfc4648";
-import { textEncoder } from "../const.js";
+import { base64 } from 'rfc4648';
+import { ParsedRFC9421Signature, PublicKeySource, RFC9421SignatureAlgorithm, SignatureOperation, VerificationOptions } from '../types.js';
+import { parseAndImportPublicKey } from '../pem/spki.js';
+import { operationFromImport, isVerificationOptions, validateSignatureAlgorithm, operationWithoutKey, validateOperationKey, validateSignatureOperation, webCryptoVerifier } from '../shared/backend.js';
+import { getRFC9421AlgoString } from './sign.js';
 
 const algorithmsDefault = ['ed25519', 'rsa-pss-sha512', 'ecdsa-p384-sha384', 'ecdsa-p256-sha256', 'hmac-sha256', 'rsa-v1_5-sha256'] satisfies RFC9421SignatureAlgorithm[];
-
-/**
- * Verify a draft signature
- * All provided algorithms are verified. If you want to limit the algorithms, use options when parsing the signature.
- * @param parsedEntries ParsedRFC9421Signature['value'] (`[label, (obj)][]`)
- * @param keys a public key or Map of public keys
- * 		* If you want to verify multiple signatures, you need to use Map as the keys
- * 		* You can use keyid and label as the key of the Map
- * @param options: Options for multiple signatures verification
- * @param errorLogger: If you want to log errors, set function
- */
+export type RFC9421VerificationOptions = VerificationOptions & { verifyAll?: boolean; algorithms?: RFC9421SignatureAlgorithm[] };
+/** Verify parsed signatures. A resolver is authoritative; label precedes keyid in legacy maps. */
+export function verifyRFC9421Signature(parsedEntries: ParsedRFC9421Signature['value'], options: RFC9421VerificationOptions): Promise<boolean>;
+export function verifyRFC9421Signature(parsedEntries: ParsedRFC9421Signature['value'], keys: PublicKeySource | Map<string, PublicKeySource>, options?: { verifyAll: boolean; algorithms?: RFC9421SignatureAlgorithm[] }, errorLogger?: (message: any) => any): Promise<boolean>;
 export async function verifyRFC9421Signature(
 	parsedEntries: ParsedRFC9421Signature['value'],
-	keys: string | CryptoKey | Map<string, string | CryptoKey>,
-	options: {
-		/**
-		 * If you want all signatures to be verified, set true
-		 */
-		verifyAll: boolean;
-		/**
-		 * Specify signature algorithms you accept. (RFC 9421 algorithm registries)
-		 *
-		 * If `verifyAll: false`, it is also used to choose the hash algorithm to verify.
-		 * (Younger index is preferred.)
-		 */
-		algorithms?: RFC9421SignatureAlgorithm[];
-	} = {
-		verifyAll: false,
-		algorithms: algorithmsDefault,
-	},
-	errorLogger?: (message: any) => any
+	keysOrOptions: PublicKeySource | Map<string, PublicKeySource> | RFC9421VerificationOptions,
+	options?: { verifyAll: boolean; algorithms?: RFC9421SignatureAlgorithm[] },
+	errorLogger?: (message: any) => any,
 ): Promise<boolean> {
+	const settings: RFC9421VerificationOptions = isVerificationOptions(keysOrOptions) ? keysOrOptions : { ...options, keys: keysOrOptions, logger: errorLogger };
+	const keys = settings.keys;
+	const verifyAll = settings.verifyAll ?? false;
+	const logger = settings.logger;
 	if (parsedEntries.length === 0) throw new Error('parsedEntries is empty');
-	if (options.verifyAll === true && !(keys instanceof Map) && parsedEntries.length > 1) {
-		throw new Error('If you want to verify multiple signatures, you need to use Map as the keys');
-	}
-
-	const algorithms = options?.algorithms?.map(x => x.toLowerCase()) ?? algorithmsDefault;
+	if (verifyAll && !(keys instanceof Map) && !settings.resolveKey && !settings.verifier && parsedEntries.length > 1) throw new Error('If you want to verify multiple signatures, you need to use Map as the keys');
+	const algorithms = settings.algorithms?.map(x => x.toLowerCase()) ?? algorithmsDefault;
 	if (algorithms.length === 0) throw new Error('algorithms is empty');
-
-	const toVerify = [] as [string, ParsedRFC9421SignatureValueWithBase, string | CryptoKey, string | undefined][];
-	let importedKeys: Awaited<ReturnType<typeof parseAndImportPublicKey>>[] = [];
-
-	for (const [label, parsed] of parsedEntries) {
-		const alg = parsed.algorithm?.toLowerCase();
-		if (alg && !algorithms.includes(alg as RFC9421SignatureAlgorithm)) {
-			continue;
+	const toVerify = parsedEntries.filter(([, parsed]) => !parsed.algorithm || algorithms.includes(parsed.algorithm.toLowerCase() as RFC9421SignatureAlgorithm));
+	if (!toVerify.length) { logger?.('No matched signature found'); return false; }
+	if (!verifyAll) toVerify.sort(([, a], [, b]) => algorithms.indexOf(a.algorithm?.toLowerCase() as RFC9421SignatureAlgorithm) - algorithms.indexOf(b.algorithm?.toLowerCase() as RFC9421SignatureAlgorithm));
+	let eligibleSignatures = 0;
+	for (const [label, parsed] of toVerify) {
+		const wire = parsed.algorithm?.toLowerCase();
+		if (wire) {
+			try { validateSignatureAlgorithm('rfc9421', wire); } catch (error) { logger?.(error); if (verifyAll) return false; continue; }
 		}
-
-		if (!(keys instanceof Map)) {
-			toVerify.push([label, parsed, keys, alg]);
-			continue;
-		}
-
-		//#region Find key by label or keyid
-		const keyByName = keys instanceof Map ?
-			(keys.get(label) ?? (parsed.keyid && keys.get(parsed.keyid)))
-			: keys;
-		if (keyByName) {
-			toVerify.push([label, parsed, keyByName, alg]);
-			continue;
-		}
-		//#endregion
-
-		if (parsed.keyid && options.verifyAll === true) {
-			// verifyAllの場合、keyidで見つからないときはエラーにする
-			// If verifyAll is true, an error will be thrown if the keyid is not found.
-			if (errorLogger) errorLogger(`key not found in provided keys (verifyAll: true), label: ${label} keyid: ${parsed.keyid}`);
-			return false;
-		}
-
-		//#region Find key by algorithm
-		if (!alg) {
-			if (errorLogger) errorLogger(`key not found by label or keyid, but algorithm also not found. label: ${label}`);
-			return false;
-		}
-
-		if (importedKeys.length === 0) {
-			importedKeys = await Promise.all(
-				Array.from(keys.values())
-					.map(key => parseAndImportPublicKey(key, ['verify']))
-			);
-		}
-
-		const keyByAlgorithm = importedKeys.find(({ algorithm }) => {
+		let candidates: (PublicKeySource | undefined)[];
+		if (settings.resolveKey) {
+			const resolved = await settings.resolveKey({ version: 'rfc9421', label, keyId: parsed.keyid, algorithm: wire });
+			candidates = resolved === undefined ? [] : Array.isArray(resolved) ? [...resolved] : [resolved as PublicKeySource];
+		} else if (keys instanceof Map) {
+			candidates = keys.has(label) ? [keys.get(label)] : parsed.keyid !== undefined ? keys.has(parsed.keyid) ? [keys.get(parsed.keyid)] : [] : wire ? [...keys.values()] : [];
+		} else candidates = keys === undefined ? settings.verifier && wire ? [undefined] : [] : [keys];
+		let verified = false;
+		let eligible = wire !== undefined || candidates.length === 0;
+		for (const candidate of candidates) {
+			if (candidate === undefined && (keys !== undefined || settings.resolveKey)) { eligible = true; continue; }
+			let key: CryptoKey | undefined;
+			let operation: SignatureOperation;
+			let signature: Uint8Array;
+			let signatureAlgorithm: string;
 			try {
-				parseSignInfo(alg, algorithm);
-				return true;
-			} catch (e) {
-				return false;
+				const imported = candidate === undefined ? undefined : await parseAndImportPublicKey(candidate, ['verify'], wire);
+				key = imported?.publicKey;
+				operation = imported ? operationFromImport(imported) : operationWithoutKey('rfc9421', wire!);
+				signatureAlgorithm = wire ?? getRFC9421AlgoString(key!.algorithm, 'hash' in operation ? operation.hash : null);
+				if (!algorithms.includes(signatureAlgorithm as RFC9421SignatureAlgorithm)) continue;
+				eligible = true;
+				validateSignatureOperation('rfc9421', signatureAlgorithm, operation);
+				if (key) validateOperationKey(key, operation, 'verify');
+				signature = base64.parse(parsed.signature);
+			} catch (error) { eligible = true; logger?.(`Invalid candidate in ${label}: ${error}`); continue; }
+			const context = { version: 'rfc9421' as const, label, keyId: parsed.keyid, key, algorithm: operation, signatureAlgorithm, signature, signingString: parsed.base };
+			if (settings.verifier) {
+				// Backend errors propagate. False ends this signature without another backend/key attempt.
+				verified = await settings.verifier(context) === true;
+				if (!verified) logger?.(`verification simply failed, label: ${label}`);
+				break;
 			}
-		});
-
-		if (keyByAlgorithm) {
-			toVerify.push([label, parsed, keyByAlgorithm.publicKey, alg]);
-			continue;
+			try { verified = await webCryptoVerifier(context); } catch (error) { logger?.(`Verification failed in ${label}: ${error}`); }
+			if (!verified) logger?.(`verification simply failed, label: ${label}`);
+			if (verified) break;
 		}
-
-		if (options.verifyAll === true) {
-			if (errorLogger) errorLogger(`key not found, label: ${label}, keyid: ${parsed.keyid}`);
-			return false;
-		}
-		//#endregion
+		if (!eligible) continue;
+		eligibleSignatures++;
+		if (verifyAll && !verified) return false;
+		if (!verifyAll && verified) return true;
 	}
-
-	if (toVerify.length === 0) {
-		if (errorLogger) errorLogger('No matched signature found');
-		return false;
-	}
-
-	if (options.verifyAll === false) {
-		// Sort by algorithm
-		toVerify.sort((a, b) => {
-			const algA = a[3]?.toLowerCase() ?? '';
-			const algB = b[3]?.toLowerCase() ?? '';
-			return algorithms.indexOf(algA as RFC9421SignatureAlgorithm) - algorithms.indexOf(algB as RFC9421SignatureAlgorithm);
-		});
-	}
-
-	for (const [label, parsed, key] of toVerify) {
-		try {
-			const { publicKey, algorithm } = await parseAndImportPublicKey(key, ['verify']);
-
-			const verify = await (await getWebcrypto()).subtle.verify(
-				algorithm, publicKey, base64.parse(parsed.signature), textEncoder.encode(parsed.base)
-			);
-
-			if (options.verifyAll === true) {
-				if (verify === true) continue;
-				if (verify === false) {
-					if (errorLogger) errorLogger(`verification simply failed, label: ${label}`);
-					return false;
-				}
-			} else {
-				if (verify === true) return true;
-				if (verify === false) {
-					if (errorLogger) errorLogger(`verification simply failed, label: ${label}`);
-					continue;
-				}
-			}
-			if (typeof verify !== 'boolean') throw new Error(verify); // unknown result
-		} catch (e) {
-			if (errorLogger) errorLogger(`Something happend in ${label}: ${e}`);
-			return false;
-		}
-	}
-
-	// If verifyAll is true, all signatures have been verified
-	// If verifyAll is false, no signature has been verified
-	return options.verifyAll === true ? true : false;
+	return verifyAll && eligibleSignatures > 0;
 }

@@ -29,3 +29,7 @@ export * from './rfc9421/verify.js';
 export * from './pem/spki.js';
 export * from './pem/pkcs1.js';
 export * from './pem/pkcs8.js';
+
+export { importPublicJwk, importPrivateJwk } from './pem/jwk.js';
+export * from './pem/multikey.js';
+export { webCryptoSigner, webCryptoVerifier } from './shared/backend.js';

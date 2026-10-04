@@ -1,13 +1,6 @@
-import { ParsedDraftSignature } from "../types.js";
-import { parseSignInfo } from "../shared/verify.js";
-/**
- * @deprecated Use `parseSignInfo`
- */
+import { parseSignInfo } from '../shared/verify.js';
+import type { ParsedDraftSignature, PublicKeySource, VerificationOptions } from '../types.js';
+/** @deprecated Use parseSignInfo */
 export declare const genSignInfoDraft: typeof parseSignInfo;
-/**
- * Verify a draft signature
- * @param parsed ParsedDraftSignature['value']
- * @param key public key
- * @param errorLogger: If you want to log errors, set function
- */
-export declare function verifyDraftSignature(parsed: ParsedDraftSignature['value'], key: string | CryptoKey, errorLogger?: (message: any) => any): Promise<boolean>;
+export declare function verifyDraftSignature(parsed: ParsedDraftSignature['value'], options: VerificationOptions): Promise<boolean>;
+export declare function verifyDraftSignature(parsed: ParsedDraftSignature['value'], key: PublicKeySource, errorLogger?: (message: any) => any): Promise<boolean>;

@@ -57,6 +57,8 @@ export declare class KeyValidationError extends Error {
 export type SignInfoDefaults = {
     hash: SignatureHashAlgorithmUpperSnake;
     ec: 'DSA' | 'DH';
+    /** Explicit RSA import/signing mode; the historical v1_5 default is retained. */
+    rsa?: 'RSASSA-PKCS1-v1_5' | 'RSA-PSS';
 };
 export declare const defaultSignInfoDefaults: SignInfoDefaults;
 export declare function genSignInfo(parsed: ParsedAlgorithmIdentifier, defaults?: SignInfoDefaults): SignInfo;
@@ -66,7 +68,12 @@ export declare function genSignInfo(parsed: ParsedAlgorithmIdentifier, defaults?
  */
 export declare function genAlgorithmForSignAndVerify(keyAlgorithm: KeyAlgorithm, hashAlgorithm: SignatureHashAlgorithmUpperSnake): {
     name: string;
+    hash: string;
+    saltLength: number;
+} | {
+    name: string;
     hash: SignatureHashAlgorithmUpperSnake;
+    saltLength?: undefined;
 };
 export declare function splitPer64Chars(str: string): string[];
 export declare function getMap<T extends MapLikeObj<K, V>, K, V>(obj: T): Map<K, V>;

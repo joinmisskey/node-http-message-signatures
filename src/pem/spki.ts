@@ -1,10 +1,13 @@
+import { decodePublicMultikey } from './multikey.js';
+import { importPublicJwk, importSignatureJwk } from './jwk.js';
+import { normalizePssContainer } from './pss.js';
 import { ASN1 } from '@lapo/asn1js';
 import { Hex } from '@lapo/asn1js/hex.js';
 import { Base64 } from '@lapo/asn1js/base64.js';
-import { genSpkiFromPkcs1, parsePkcs1 } from './pkcs1.js';
 import { ECNamedCurve, KeyAlgorithmName } from '../types.js';
 import { SignInfoDefaults, defaultSignInfoDefaults, genAlgorithmForSignAndVerify, genSignInfo, getWebcrypto } from '../utils.js';
-import { parseSignInfo } from '../shared/verify.js';
+import { KeyHashValidationError, parseSignInfo } from '../shared/verify.js';
+import { genSpkiFromPkcs1, parsePkcs1 } from './pkcs1.js';
 
 export class SpkiParseError extends Error {
 	constructor(message: string) { super(message); }
@@ -20,7 +23,7 @@ export class SpkiParseError extends Error {
 export function getPublicKeyAlgorithmNameFromOid(oidStr: string): KeyAlgorithmName {
 	const oid = oidStr.split('\n')[0].trim();
 	if (oid === '1.2.840.113549.1.1.1') return 'RSASSA-PKCS1-v1_5';
-	if (oid === '1.2.840.113549.1.1.7') return 'RSA-PSS';
+	if (oid === '1.2.840.113549.1.1.10') return 'RSA-PSS';
 	if (oid === '1.2.840.10040.4.1') return 'DSA';
 	if (oid === '1.2.840.10046.2.1') return 'DH';
 	if (oid === '2.16.840.1.101.2.1.1.22') return 'KEA';
@@ -62,7 +65,7 @@ export function asn1ToArrayBuffer(asn1: ASN1, contentOnly = false) {
 		// enc is binary string
 		return Uint8Array.from(fullEnc.slice(start, end), s => s.charCodeAt(0)).buffer;
 	} else if (fullEnc instanceof Uint8Array) {
-		return fullEnc.buffer.slice(start, end);
+		return new Uint8Array(fullEnc.subarray(start, end)).buffer;
 	} if (fullEnc instanceof ArrayBuffer) {
 		return new Uint8Array(fullEnc.slice(start, end)).buffer;
 	} else if (Array.isArray(fullEnc)) {
@@ -124,11 +127,15 @@ export type SpkiParsedAlgorithmIdentifier = ParsedAlgorithmIdentifierBase & {
 const reHex = /^\s*(?:[0-9A-Fa-f][0-9A-Fa-f]\s*)+$/;
 
 export function decodePem(input: ASN1.StreamOrBinary): Exclude<ASN1.StreamOrBinary, string> {
+	if (typeof input === 'string' && input.length > 4 * 1024 * 1024) throw new SpkiParseError('Encoded key exceeds 4 MiB limit');
 	const der = typeof input === 'string' ?
 		reHex.test(input) ?
 			Hex.decode(input) :
 			Base64.unarmor(input) :
 		input;
+	const data = typeof der === 'object' && 'enc' in der ? der.enc : der;
+	const length = data instanceof ArrayBuffer ? data.byteLength : data.length;
+	if (length > 1024 * 1024) throw new SpkiParseError('Decoded key exceeds 1 MiB limit');
 	return der;
 }
 
@@ -157,9 +164,12 @@ export function parseSpki(input: ASN1.StreamOrBinary): SpkiParsedAlgorithmIdenti
 	const parsed = ASN1.decode(decodePem(input));
 	if (!parsed.sub || parsed.sub.length === 0 || parsed.sub.length > 2) throw new SpkiParseError('Invalid SPKI (invalid sub)');
 
+	const identifier = parseAlgorithmIdentifier(parsed.sub[0]);
+	const der = asn1ToArrayBuffer(parsed);
+	if (identifier.algorithm.split('\n')[0] === '1.2.840.113549.1.1.10' && parsed.posEnd() !== parsed.stream.enc.length) throw new SpkiParseError('Trailing PSS key data');
 	return {
-		der: asn1ToArrayBuffer(parsed),
-		...parseAlgorithmIdentifier(parsed.sub[0]),
+		der: identifier.algorithm.split('\n')[0] === '1.2.840.113549.1.1.10' ? normalizePssContainer(new Uint8Array(der), 0) : der,
+		...identifier,
 	};
 }
 
@@ -178,6 +188,7 @@ export function parseSpki(input: ASN1.StreamOrBinary): SpkiParsedAlgorithmIdenti
  * @returns parsed object
  */
 export function parsePublicKey(input: ASN1.StreamOrBinary): SpkiParsedAlgorithmIdentifier {
+	if (typeof input === 'string' && input.startsWith('z')) return parseSpki(decodePublicMultikey(input));
 	try {
 		// Try to parse as SPKI
 		return parseSpki(input);
@@ -200,8 +211,9 @@ export function parsePublicKey(input: ASN1.StreamOrBinary): SpkiParsedAlgorithmI
  * @param defaults
  * @returns CryptoKey
  */
-export async function importPublicKey(key: ASN1.StreamOrBinary, keyUsages: KeyUsage[] = ['verify'], defaults: SignInfoDefaults = defaultSignInfoDefaults, extractable = false) {
-	const parsedPublicKey = parsePublicKey(key);
+export async function importPublicKey(key: ASN1.StreamOrBinary | JsonWebKey, keyUsages: KeyUsage[] = ['verify'], defaults: SignInfoDefaults = defaultSignInfoDefaults, extractable = false) {
+	if (typeof key === 'object' && 'kty' in key) return importPublicJwk(key, keyUsages, defaults, extractable);
+	const parsedPublicKey = parsePublicKey(key as ASN1.StreamOrBinary);
 	return await (await getWebcrypto()).subtle.importKey('spki', parsedPublicKey.der, genSignInfo(parsedPublicKey, defaults), extractable, keyUsages);
 }
 
@@ -214,11 +226,16 @@ export async function importPublicKey(key: ASN1.StreamOrBinary, keyUsages: KeyUs
  * @returns
  */
 export async function parseAndImportPublicKey(
-	source: ASN1.StreamOrBinary | CryptoKey,
+	source: ASN1.StreamOrBinary | CryptoKey | JsonWebKey,
 	keyUsages: KeyUsage[] = ['verify'],
 	providedAlgorithm?: string,
-	errorLogger?: ((message: any) => any)
+	errorLogger?: ((message: any) => any),
 ) {
+	if (typeof source === 'object' && 'kty' in source) {
+		const { key, algorithm } = await importSignatureJwk(source, false, keyUsages, defaultSignInfoDefaults, false, providedAlgorithm);
+		return { publicKey: key, algorithm };
+	}
+	source = source as ASN1.StreamOrBinary | CryptoKey;
 	if (
 		typeof source === 'string' ||
 		(
@@ -238,6 +255,12 @@ export async function parseAndImportPublicKey(
 
 	// Is a CryptoKey
 	const signInfo = parseSignInfo(providedAlgorithm, source.algorithm, errorLogger);
+	if (signInfo.name !== source.algorithm.name) {
+		throw new KeyHashValidationError('Provided algorithm does not match the imported CryptoKey');
+	}
+	if ('hash' in signInfo && 'hash' in source.algorithm && (source.algorithm as RsaHashedKeyAlgorithm).hash.name !== signInfo.hash) {
+		throw new KeyHashValidationError('Provided hash does not match the imported CryptoKey');
+	}
 	return {
 		publicKey: source,
 		algorithm: genAlgorithmForSignAndVerify(source.algorithm, 'hash' in signInfo ? signInfo.hash : null),

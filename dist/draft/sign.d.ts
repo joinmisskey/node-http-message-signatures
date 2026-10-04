@@ -1,6 +1,6 @@
-import type { IncomingRequest, PrivateKey, SignatureHashAlgorithmUpperSnake } from '../types.js';
 import { type SignInfoDefaults } from '../utils.js';
 import { genSignature } from '../shared/sign.js';
+import type { CustomSigningKey, IncomingRequest, PrivateKey, SignatureHashAlgorithmUpperSnake, SignatureSigner } from '../types.js';
 /**
  * Get the algorithm string for draft encoding
  * @param keyAlgorithm Comes from `privateKey.algorithm.name` e.g. 'RSASSA-PKCS1-v1_5'
@@ -21,7 +21,9 @@ export declare function genDraftSignatureHeader(includeHeaders: string[], keyId:
  * @param opts
  * @returns result object
  */
-export declare function signAsDraftToRequest(request: IncomingRequest, key: PrivateKey, includeHeaders: string[], opts?: SignInfoDefaults): Promise<{
+export declare function signAsDraftToRequest(request: IncomingRequest, key: PrivateKey | CustomSigningKey, includeHeaders: string[], opts?: SignInfoDefaults & {
+    signer?: SignatureSigner;
+}): Promise<{
     signingString: string;
     signature: string;
     signatureHeader: string;

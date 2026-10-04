@@ -1,3 +1,4 @@
+import type { SFVHeaderTypeDictionary } from '../rfc9421/sfv.js';
 import type { ClockSkewSettings, IncomingRequest, OutgoingResponse, ParsedSignature } from '../types.js';
 export type RequestParseOptions = {
     /**
@@ -15,6 +16,8 @@ export type RequestParseOptions = {
         rfc9421?: string[];
     };
     clockSkew?: ClockSkewSettings;
+    /** Additional Structured Field types used when parsing RFC 9421 components. */
+    additionalSfvTypeDictionary?: SFVHeaderTypeDictionary;
 };
 export declare class HTTPMessageSignaturesParseError extends Error {
     constructor(message: string);

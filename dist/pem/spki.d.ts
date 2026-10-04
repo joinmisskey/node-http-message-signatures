@@ -99,7 +99,7 @@ export declare function parsePublicKey(input: ASN1.StreamOrBinary): SpkiParsedAl
  * @param defaults
  * @returns CryptoKey
  */
-export declare function importPublicKey(key: ASN1.StreamOrBinary, keyUsages?: KeyUsage[], defaults?: SignInfoDefaults, extractable?: boolean): Promise<CryptoKey>;
+export declare function importPublicKey(key: ASN1.StreamOrBinary | JsonWebKey, keyUsages?: KeyUsage[], defaults?: SignInfoDefaults, extractable?: boolean): Promise<CryptoKey>;
 /**
  * Prepare public key for verification
  * @param source PEM, DER or CryptoKey
@@ -108,10 +108,15 @@ export declare function importPublicKey(key: ASN1.StreamOrBinary, keyUsages?: Ke
  * @param errorLogger
  * @returns
  */
-export declare function parseAndImportPublicKey(source: ASN1.StreamOrBinary | CryptoKey, keyUsages?: KeyUsage[], providedAlgorithm?: string, errorLogger?: ((message: any) => any)): Promise<{
+export declare function parseAndImportPublicKey(source: ASN1.StreamOrBinary | CryptoKey | JsonWebKey, keyUsages?: KeyUsage[], providedAlgorithm?: string, errorLogger?: ((message: any) => any)): Promise<{
     publicKey: any;
     algorithm: {
         name: string;
+        hash: string;
+        saltLength: number;
+    } | {
+        name: string;
         hash: import("../types.js").SignatureHashAlgorithmUpperSnake;
+        saltLength?: undefined;
     };
 }>;
