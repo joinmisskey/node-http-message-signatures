@@ -124,6 +124,8 @@ pnpm run test --runInBand
 pnpm run test:browser
 ```
 
+CI tests Node 22 and 24 (supported LTS) and Node 26 (Current). Lint and browser jobs use Node 24. This CI coverage does not change the package engines compatibility declaration.
+
 The browser runner needs Node 22+ and Chrome available as `google-chrome`
 (or set `CHROME_BIN`). It extends the earlier Chrome query regression harness,
 using a temporary isolated profile and localhost server, then removes them.
