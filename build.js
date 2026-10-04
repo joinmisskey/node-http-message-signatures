@@ -1,4 +1,5 @@
 import esbuild from 'esbuild';
+import { rm } from 'node:fs/promises';
 const watch = process.argv[2]?.includes('watch');
 
 const __dirname = new URL('.', import.meta.url).pathname;
@@ -25,6 +26,7 @@ const buildOptionsBase = {
 
 (async () => {
 	if (!watch) {
+		await rm(buildOptionsBase.outdir, { recursive: true, force: true });
 		await esbuild.build({
 			...buildOptionsBase,
 			format: 'esm',
