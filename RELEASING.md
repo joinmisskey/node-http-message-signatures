@@ -8,8 +8,8 @@ repository or imply endorsement by its original maintainers.
 ## Validate the reviewed commit
 
 Use an isolated checkout, Node.js supported by `package.json`, and the pinned
-`pnpm@8.15.4`. The inherited CI matrix covers Node 18, 20, and 21; Node 24 also
-supports the Web Crypto RSA and Ed25519 tests. No global tooling changes are needed
+`pnpm@8.15.4`. CI covers Node 22 and 24 (supported LTS) and Node 26 (Current). Lint and
+browser jobs use Node 24; the engines compatibility declaration is unchanged. No global tooling changes are needed
 when a local pnpm installation is used.
 
 ```sh
@@ -17,8 +17,10 @@ pnpm install --frozen-lockfile
 node --test scripts/release-info.test.mjs
 pnpm eslint
 pnpm build
-pnpm run test --runInBand
-pnpm run test --runInBand test/unit/draft-query.ts
+node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand
+node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand test/unit/draft-query.ts
+pnpm run test:types
+pnpm run test:browser
 pnpm performance
 pnpm pack --pack-destination /tmp
 ```
@@ -33,8 +35,11 @@ record unsupported browser algorithms explicitly.
 Draft regression tests verify absolute-URL signatures against origin-form targets
 using both this library and `@peertube/http-signature`. Queries retain their raw
 encoding/order and an empty `?`; fragments are excluded. Existing no-query
-signature fixtures and RFC 9421 component tests must still pass. RFC 9421 code is
-outside the scope of this fix.
+signature fixtures and RFC 9421 component tests must still pass. The 1.0.0 release also includes reviewed RFC 9421 ECDSA/SFV verification,
+RSA-PSS, PKCS#1 private keys, local JWK input, public Multikey input and
+signer/verifier/resolver hooks. Multikey support covers Ed25519 and RSA only.
+Chrome main-thread and DedicatedWorker WebCrypto are tested; Firefox, Safari
+and Service Worker network/lifecycle behavior are not covered.
 
 ## Choose the release version and channel
 
@@ -44,12 +49,13 @@ Read registry state again immediately before deciding a version:
 npm view @misskey-dev/node-http-message-signatures versions dist-tags --json
 ```
 
-At preparation time (2026-10-04), registry `latest` is `0.0.10`. The source main
-commit `308c1e1630b77ef1c961e52e1af05a0e9df5e6d2` and source Git tag
-`1.0.0-beta.1` both have package version `0.0.10`. A GitHub tag/release name does
-not establish an npm package version. The query-fix PR left that version unchanged.
-After merging it, release preparation selects the next unused patch, `0.0.11`;
-this is prepared in the fork only and has not been published to npm.
+As of 2026-10-04, npm `latest` is `0.0.11`, which is publicly published.
+The user selected the unused stable version `1.0.0` and channel `latest` for the
+reviewed main changes from PRs #2–#7, based on commit
+`4bfeb5dfb8df62bf66c80a14eb3ff9e103560e18`. The release commit updates the
+package version and build artifacts; the tag `v1.0.0` must point to that commit.
+Read registry and staged-package state before any future release; do not reuse
+an old tarball or assume that a GitHub tag determines the npm package version.
 
 A maintainer must choose an unused version and explicitly approve the dist-tag
 (`latest` for a stable release or an agreed prerelease tag such as `beta`). npm
@@ -62,8 +68,8 @@ to inspect the intended payload without publishing. Keep the scope unchanged.
 
 The selected release method is npm OIDC **staged publishing**. The workflow
 `.github/workflows/npm-publish.yml` stages only; it never directly publishes,
-approves a staged package, or executes `npm dist-tag`. Package version remains
-`0.0.11`, and the npm name remains `@misskey-dev/node-http-message-signatures`.
+approves a staged package, or executes `npm dist-tag`. The selected package version is
+`1.0.0`, and the npm name remains `@misskey-dev/node-http-message-signatures`.
 
 The owner registers the Trusted Publisher in npm package settings with:
 
@@ -86,25 +92,25 @@ the staged-publishing minimums (Node 22.14 and npm 11.15). npm handles OIDC and
 provenance; no npm token secret/env references are used. Dependencies and build
 use pnpm, while pack/dry-run/staging use npm.
 
-## Trigger a reviewed staging run — only after separate approval
+## Trigger the approved release staging run
 
 Before staging, confirm that the version is unused in both published versions and
 Staged Packages; staged versions also reserve their version number. The selected
 tag must reference the approved commit that includes this workflow and scripts.
-No tag, GitHub Release, workflow dispatch, or staging upload has been performed
-as part of workflow preparation.
+The user has approved the 1.0.0 GitHub Release and npm staging. Owner approval
+of the staged npm package remains a separate final action.
 
-Choose exactly one trigger after approval:
+Choose exactly one trigger for the approved version:
 
 - Publish a GitHub Release using the reviewed version tag. The trigger is
   `release: published`, so saving a draft does not stage anything. The release's
   prerelease flag must match the package version.
 - Run the workflow manually from `main`, providing an existing reviewed
-  `release_tag`, `dist_tag`, and `confirm_stage=true`. For example, after a
-  separately approved `v0.0.11` tag exists:
+  `release_tag`, `dist_tag`, and `confirm_stage=true`. For example, after an
+  approved `v1.0.0` tag exists:
 
   ```sh
-  gh workflow run npm-publish.yml --repo joinmisskey/node-http-message-signatures --ref main -f release_tag=v0.0.11 -f dist_tag=latest -f confirm_stage=true
+  gh workflow run npm-publish.yml --repo joinmisskey/node-http-message-signatures --ref main -f release_tag=v1.0.0 -f dist_tag=latest -f confirm_stage=true
   ```
 
 Tags must be exactly the package version, with an optional `v` prefix. The job
@@ -118,8 +124,8 @@ supported. Release events derive the same channel from the version.
 The job runs the guard tests, frozen dependency install, lint, build, and unit
 tests. It packs one tarball, checks its expected filename, and runs
 `npm stage publish --dry-run` on it before staging **the same tarball**. For
-`0.0.11` the artifact is
-`misskey-dev-node-http-message-signatures-0.0.11.tgz`. Staging does not make that
+`1.0.0` the artifact is
+`misskey-dev-node-http-message-signatures-1.0.0.tgz`. Staging does not make that
 version publicly installable. Pushes and PR merges never trigger staging.
 
 ## Owner review and final publication

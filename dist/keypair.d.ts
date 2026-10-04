@@ -13,7 +13,7 @@ export declare function genEd25519KeyPair(keyUsage?: KeyUsage[]): Promise<{
     publicKey: string;
     privateKey: string;
 }>;
-export declare function genEd448KeyPair(keyUsage: any): Promise<{
+export declare function genEd448KeyPair(keyUsage?: KeyUsage[]): Promise<{
     publicKey: string;
     privateKey: string;
 }>;

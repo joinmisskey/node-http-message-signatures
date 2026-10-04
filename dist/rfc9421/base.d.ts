@@ -24,7 +24,7 @@ export declare class RFC9421SignatureBaseFactory<T extends IncomingRequest | Out
      *
      * @param source request or response, must include 'signature-input' header
      *	If source is node response, it must include 'req' property.
-     * @param scheme optional, used when source request url starts with '/'
+     * @param scheme optional, used when source request url starts with '/'. e.g. `http`
      * @param additionalSfvTypeDictionary additional SFV type dictionary
      * @param request optional, used when source is a browser Response
      * @param requiredComponents
