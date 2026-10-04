@@ -1,5 +1,5 @@
 import { generateKeyPairSync, createPrivateKey, sign, verify } from 'node:crypto';
-import { genPkcs8FromPkcs1, importPrivateKey, parsePkcs1PrivateKey, genSignature } from '../../src/index.js';
+import { decodePem, parsePkcs8, genPkcs8FromPkcs1, importPrivateKey, parsePkcs1PrivateKey, genSignature } from '../../src/index.js';
 import { derSequence } from '../../src/pem/der.js';
 import { genASN1Length } from '../../src/utils.js';
 
@@ -38,4 +38,20 @@ test('rejects encrypted PEM and encrypted PKCS#8', async () => {
 	await expect(importPrivateKey(encrypted)).rejects.toThrow();
 	const encrypted8 = pair.privateKey.export({ type: 'pkcs8', format: 'der', cipher: 'aes-256-cbc', passphrase: 'fixture-only' });
 	await expect(importPrivateKey(encrypted8)).rejects.toThrow();
+});
+
+test('bounds encoded and decoded inputs before generic ASN.1 parsing', async () => {
+	const encoded = 'A'.repeat(4 * 1024 * 1024 + 1);
+	const decoded = new Uint8Array(1024 * 1024 + 1);
+	for (const oversized of [encoded, decoded, Buffer.from(decoded).toString('base64')]) {
+		expect(() => decodePem(oversized)).toThrow(/limit/);
+		expect(() => parsePkcs8(oversized)).toThrow(/limit/);
+		await expect(importPrivateKey(oversized)).rejects.toThrow(/limit/);
+	}
+	expect(() => parsePkcs1PrivateKey(sequence(new Array(65).fill([2, 1, 1]).flat()))).toThrow('Too many DER fields');
+});
+
+test('normal PEM whitespace remains accepted', async () => {
+	const whitespace = pem.replace(/\n/g, '\r\n').replace(/(.{64})\r\n/g, '$1  \t\r\n');
+	await expect(importPrivateKey(whitespace)).resolves.toHaveProperty('type', 'private');
 });

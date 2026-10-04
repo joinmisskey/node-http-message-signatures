@@ -1,10 +1,10 @@
 import { ASN1 } from '@lapo/asn1js';
 import { Hex } from '@lapo/asn1js/hex.js';
 import { Base64 } from '@lapo/asn1js/base64.js';
-import { genSpkiFromPkcs1, parsePkcs1 } from './pkcs1.js';
 import { ECNamedCurve, KeyAlgorithmName } from '../types.js';
 import { SignInfoDefaults, defaultSignInfoDefaults, genAlgorithmForSignAndVerify, genSignInfo, getWebcrypto } from '../utils.js';
 import { KeyHashValidationError, parseSignInfo } from '../shared/verify.js';
+import { genSpkiFromPkcs1, parsePkcs1 } from './pkcs1.js';
 
 export class SpkiParseError extends Error {
 	constructor(message: string) { super(message); }
@@ -124,11 +124,15 @@ export type SpkiParsedAlgorithmIdentifier = ParsedAlgorithmIdentifierBase & {
 const reHex = /^\s*(?:[0-9A-Fa-f][0-9A-Fa-f]\s*)+$/;
 
 export function decodePem(input: ASN1.StreamOrBinary): Exclude<ASN1.StreamOrBinary, string> {
+	if (typeof input === 'string' && input.length > 4 * 1024 * 1024) throw new SpkiParseError('Encoded key exceeds 4 MiB limit');
 	const der = typeof input === 'string' ?
 		reHex.test(input) ?
 			Hex.decode(input) :
 			Base64.unarmor(input) :
 		input;
+	const data = typeof der === 'object' && 'enc' in der ? der.enc : der;
+	const length = data instanceof ArrayBuffer ? data.byteLength : data.length;
+	if (length > 1024 * 1024) throw new SpkiParseError('Decoded key exceeds 1 MiB limit');
 	return der;
 }
 
@@ -217,7 +221,7 @@ export async function parseAndImportPublicKey(
 	source: ASN1.StreamOrBinary | CryptoKey,
 	keyUsages: KeyUsage[] = ['verify'],
 	providedAlgorithm?: string,
-	errorLogger?: ((message: any) => any)
+	errorLogger?: ((message: any) => any),
 ) {
 	if (
 		typeof source === 'string' ||
