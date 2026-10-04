@@ -78,7 +78,12 @@ export type PrivateKeyWithCryptoKey = {
     privateKey: CryptoKey;
     keyId: string;
 };
-export type PrivateKey = PrivateKeyWithPem | PrivateKeyWithCryptoKey;
+export type PrivateKeyWithJwk = {
+    privateKeyJwk: JsonWebKey;
+    keyId: string;
+};
+export type PrivateKey = PrivateKeyWithPem | PrivateKeyWithCryptoKey | PrivateKeyWithJwk;
+export type PublicKeySource = string | CryptoKey | JsonWebKey;
 export type KeyAlgorithmName = 'RSA-PSS' | 'RSASSA-PKCS1-v1_5' | 'DSA' | 'DH' | 'KEA' | 'EC' | 'Ed25519' | 'Ed448';
 export type ECNamedCurve = 'P-192' | 'P-224' | 'P-256' | 'P-384' | 'P-521';
 export type SignatureHashAlgorithmUpperSnake = 'SHA-1' | 'SHA-256' | 'SHA-384' | 'SHA-512' | null;

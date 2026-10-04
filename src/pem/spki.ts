@@ -1,3 +1,4 @@
+import { importPublicJwk, importSignatureJwk } from './jwk.js';
 import { normalizePssContainer } from './pss.js';
 import { ASN1 } from '@lapo/asn1js';
 import { Hex } from '@lapo/asn1js/hex.js';
@@ -204,8 +205,9 @@ export function parsePublicKey(input: ASN1.StreamOrBinary): SpkiParsedAlgorithmI
  * @param defaults
  * @returns CryptoKey
  */
-export async function importPublicKey(key: ASN1.StreamOrBinary, keyUsages: KeyUsage[] = ['verify'], defaults: SignInfoDefaults = defaultSignInfoDefaults, extractable = false) {
-	const parsedPublicKey = parsePublicKey(key);
+export async function importPublicKey(key: ASN1.StreamOrBinary | JsonWebKey, keyUsages: KeyUsage[] = ['verify'], defaults: SignInfoDefaults = defaultSignInfoDefaults, extractable = false) {
+	if (typeof key === 'object' && 'kty' in key) return importPublicJwk(key, keyUsages, defaults, extractable);
+	const parsedPublicKey = parsePublicKey(key as ASN1.StreamOrBinary);
 	return await (await getWebcrypto()).subtle.importKey('spki', parsedPublicKey.der, genSignInfo(parsedPublicKey, defaults), extractable, keyUsages);
 }
 
@@ -218,11 +220,16 @@ export async function importPublicKey(key: ASN1.StreamOrBinary, keyUsages: KeyUs
  * @returns
  */
 export async function parseAndImportPublicKey(
-	source: ASN1.StreamOrBinary | CryptoKey,
+	source: ASN1.StreamOrBinary | CryptoKey | JsonWebKey,
 	keyUsages: KeyUsage[] = ['verify'],
 	providedAlgorithm?: string,
 	errorLogger?: ((message: any) => any)
 ) {
+	if (typeof source === 'object' && 'kty' in source) {
+		const { key, algorithm } = await importSignatureJwk(source, false, keyUsages, defaultSignInfoDefaults, false, providedAlgorithm);
+		return { publicKey: key, algorithm };
+	}
+	source = source as ASN1.StreamOrBinary | CryptoKey;
 	if (
 		typeof source === 'string' ||
 		(

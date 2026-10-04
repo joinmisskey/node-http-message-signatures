@@ -1,3 +1,4 @@
+import type { PublicKeySource } from '../types.js';
 import { ParsedDraftSignature } from "../types.js";
 import { parseSignInfo } from "../shared/verify.js";
 /**
@@ -10,4 +11,4 @@ export declare const genSignInfoDraft: typeof parseSignInfo;
  * @param key public key
  * @param errorLogger: If you want to log errors, set function
  */
-export declare function verifyDraftSignature(parsed: ParsedDraftSignature['value'], key: string | CryptoKey, errorLogger?: (message: any) => any): Promise<boolean>;
+export declare function verifyDraftSignature(parsed: ParsedDraftSignature['value'], key: PublicKeySource, errorLogger?: (message: any) => any): Promise<boolean>;

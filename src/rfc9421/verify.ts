@@ -1,3 +1,4 @@
+import type { PublicKeySource } from '../types.js';
 import { ParsedRFC9421Signature, RFC9421SignatureAlgorithm } from "../types.js";
 import { parseAndImportPublicKey } from "../pem/spki.js";
 import { getWebcrypto } from "../utils.js";
@@ -19,7 +20,7 @@ const algorithmsDefault = ['ed25519', 'rsa-pss-sha512', 'ecdsa-p384-sha384', 'ec
  */
 export async function verifyRFC9421Signature(
 	parsedEntries: ParsedRFC9421Signature['value'],
-	keys: string | CryptoKey | Map<string, string | CryptoKey>,
+	keys: PublicKeySource | Map<string, PublicKeySource>,
 	options: {
 		/**
 		 * If you want all signatures to be verified, set true
@@ -65,7 +66,7 @@ export async function verifyRFC9421Signature(
 
 	for (const [label, parsed] of toVerify) {
 		const alg = parsed.algorithm?.toLowerCase();
-		let candidates: (string | CryptoKey)[];
+		let candidates: PublicKeySource[];
 		if (!(keys instanceof Map)) {
 			candidates = [keys];
 		} else if (keys.has(label)) {

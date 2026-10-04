@@ -1,3 +1,4 @@
+import { importPrivateJwk } from './jwk.js';
 import { normalizePssContainer } from './pss.js';
 import { genPkcs8FromPkcs1 } from './pkcs1.js';
 import { ASN1 } from '@lapo/asn1js';
@@ -61,7 +62,9 @@ export function parsePkcs8(input: ASN1.StreamOrBinary): ParsedPkcs8 {
  * @param defaults
  * @returns CryptoKey
  */
-export async function importPrivateKey(key: ASN1.StreamOrBinary, keyUsages: KeyUsage[] = ['sign'], defaults: SignInfoDefaults = defaultSignInfoDefaults, extractable = false) {
+export async function importPrivateKey(key: ASN1.StreamOrBinary | JsonWebKey, keyUsages: KeyUsage[] = ['sign'], defaults: SignInfoDefaults = defaultSignInfoDefaults, extractable = false) {
+	if (typeof key === 'object' && 'kty' in key) return importPrivateJwk(key, keyUsages, defaults, extractable);
+	key = key as ASN1.StreamOrBinary;
 	let parsedPrivateKey: ParsedPkcs8;
 	try {
 		parsedPrivateKey = parsePkcs8(key);

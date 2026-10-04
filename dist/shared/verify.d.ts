@@ -1,3 +1,4 @@
+import type { PublicKeySource } from '../types.js';
 /**
  * Verify Request (Parsed)
  */
@@ -18,4 +19,4 @@ export declare function parseSignInfo(algorithm: string | undefined, real: Parse
  * This function is a wrapper for `verifyDraftSignature` and `verifyRFC9421Signature`.
  * `verifyRFC9421Signature` is fixed to verifyAll: false.
  */
-export declare function verifyParsedSignature(parsed: ParsedSignature, keys: string | CryptoKey | Map<string, string | CryptoKey>, errorLogger?: ((message: any) => any)): Promise<boolean>;
+export declare function verifyParsedSignature(parsed: ParsedSignature, keys: PublicKeySource | Map<string, PublicKeySource>, errorLogger?: ((message: any) => any)): Promise<boolean>;

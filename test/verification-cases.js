@@ -8,7 +8,7 @@ export const verificationCaseNames = [
   'fallback import is isolated per signature algorithm', 'algorithm allowlist is respected',
   'missing algorithm requires an identified key', 'custom SFV parsing and verification',
   'native Fetch Request signing and verification', 'pre-imported RSA keys enforce algorithm and hash',
-  'RSA-PSS SHA-512 uses exactly 64 salt bytes',
+  'RSA-PSS SHA-512 uses exactly 64 salt bytes', 'native JWK metadata and Ed25519 signing',
 ];
 
 function assert(value, message) {
@@ -148,6 +148,18 @@ export async function createVerificationCases(api, crypto) {
       const signature = new Uint8Array(await crypto.subtle.sign({ name: 'RSA-PSS', saltLength }, pair.privateKey, new TextEncoder().encode(parsed.value[0][1].base)));
       const bad = [['pss', { ...parsed.value[0][1], signature: btoa(String.fromCharCode(...signature)) }]];
       assert(!await api.verifyRFC9421Signature(bad, pair.publicKey), 'Wrong PSS salt accepted');
+    }
+  };
+  cases['native JWK metadata and Ed25519 signing'] = async () => {
+    const pair = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+    const privateKeyJwk = { ...await crypto.subtle.exportKey('jwk', pair.privateKey), alg: 'EdDSA', use: 'sig' };
+    const pub = { ...await crypto.subtle.exportKey('jwk', pair.publicKey), alg: 'EdDSA', use: 'sig' };
+    const request = { method: 'POST', url: 'https://example.com/jwk?q=1', headers: { Host: 'example.com' } };
+    await api.signAsRFC9421ToRequestOrResponse(request, { jwk: { key: { keyId: 'jwk', privateKeyJwk }, identifiers: ['@method', '@target-uri'] } });
+    const parsed = api.parseRequestSignature(request);
+    assert(await api.verifyParsedSignature(parsed, pub), 'Ed25519 JWK failed');
+    for (const changes of [{ use: 'enc' }, { key_ops: ['sign'] }, { d: privateKeyJwk.d }, { alg: 'RS256' }]) {
+      assert(!await api.verifyParsedSignature(parsed, { ...pub, ...changes }), 'Incompatible JWK accepted');
     }
   };
   return cases;

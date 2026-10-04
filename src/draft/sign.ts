@@ -63,7 +63,7 @@ export async function signAsDraftToRequest(request: IncomingRequest, key: Privat
 		opts.hash = (opts as any).hashAlgorithm;
 	}
 
-	const privateKey = 'privateKey' in key ? key.privateKey : await importPrivateKey(key.privateKeyPem, ['sign'], opts);
+	const privateKey = 'privateKey' in key ? key.privateKey : await importPrivateKey(('privateKeyJwk' in key ? key.privateKeyJwk : key.privateKeyPem), ['sign'], opts);
 	const algoString = getDraftAlgoString(privateKey.algorithm.name, opts.hash);
 
 	const signingString = genDraftSigningString(request, includeHeaders, { keyId: key.keyId, algorithm: algoString });

@@ -1,3 +1,4 @@
+import type { PublicKeySource } from '../types.js';
 /**
  * Verify Request (Parsed)
  */
@@ -136,7 +137,7 @@ export function parseSignInfo(algorithm: string | undefined, real: ParsedAlgorit
  */
 export function verifyParsedSignature(
 	parsed: ParsedSignature,
-	keys: string | CryptoKey | Map<string, string | CryptoKey>,
+	keys: PublicKeySource | Map<string, PublicKeySource>,
 	errorLogger?: ((message: any) => any)
 ): Promise<boolean> {
 	if (parsed.version === 'draft') {

@@ -35,4 +35,4 @@ export declare function parsePkcs8(input: ASN1.StreamOrBinary): ParsedPkcs8;
  * @param defaults
  * @returns CryptoKey
  */
-export declare function importPrivateKey(key: ASN1.StreamOrBinary, keyUsages?: KeyUsage[], defaults?: SignInfoDefaults, extractable?: boolean): Promise<CryptoKey>;
+export declare function importPrivateKey(key: ASN1.StreamOrBinary | JsonWebKey, keyUsages?: KeyUsage[], defaults?: SignInfoDefaults, extractable?: boolean): Promise<CryptoKey>;

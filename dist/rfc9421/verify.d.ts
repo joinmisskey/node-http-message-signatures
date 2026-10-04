@@ -1,3 +1,4 @@
+import type { PublicKeySource } from '../types.js';
 import { ParsedRFC9421Signature, RFC9421SignatureAlgorithm } from "../types.js";
 /**
  * Verify RFC 9421 signatures
@@ -10,7 +11,7 @@ import { ParsedRFC9421Signature, RFC9421SignatureAlgorithm } from "../types.js";
  * @param options: Options for multiple signatures verification
  * @param errorLogger: If you want to log errors, set function
  */
-export declare function verifyRFC9421Signature(parsedEntries: ParsedRFC9421Signature['value'], keys: string | CryptoKey | Map<string, string | CryptoKey>, options?: {
+export declare function verifyRFC9421Signature(parsedEntries: ParsedRFC9421Signature['value'], keys: PublicKeySource | Map<string, PublicKeySource>, options?: {
     /**
      * If you want all signatures to be verified, set true
      */

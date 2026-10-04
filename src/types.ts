@@ -88,7 +88,9 @@ export type PrivateKeyWithCryptoKey = {
 	privateKey: CryptoKey;
 	keyId: string;
 };
-export type PrivateKey = PrivateKeyWithPem | PrivateKeyWithCryptoKey;
+export type PrivateKeyWithJwk = { privateKeyJwk: JsonWebKey; keyId: string };
+export type PrivateKey = PrivateKeyWithPem | PrivateKeyWithCryptoKey | PrivateKeyWithJwk;
+export type PublicKeySource = string | CryptoKey | JsonWebKey;
 
 // Compatible with CryptoKey.algorithm.name
 export type KeyAlgorithmName = 'RSA-PSS' | 'RSASSA-PKCS1-v1_5' | 'DSA' | 'DH' | 'KEA' | 'EC' | 'Ed25519' | 'Ed448';

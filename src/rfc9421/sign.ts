@@ -82,7 +82,7 @@ export async function processSingleRFC9421SignSource(source: RFC9421SignSource) 
 	const defaults = source.defaults ?? defaultSignInfoDefaults;
 	const privateKey = 'privateKey' in source.key ?
 		source.key.privateKey
-		: await importPrivateKey(source.key.privateKeyPem, ['sign'], defaults);
+		: await importPrivateKey(('privateKeyJwk' in source.key ? source.key.privateKeyJwk : source.key.privateKeyPem), ['sign'], defaults);
 	const alg = getRFC9421AlgoString(privateKey.algorithm, defaults.hash);
 	const created = source.created ?? Math.round(Date.now() / 1000);
 	const expires = source.expiresAfter ? created + source.expiresAfter : undefined;

@@ -147,3 +147,7 @@ indentation comes from Pichu Chen (PichuChen)'s
 ### RFC 9421 RSA-PSS
 
 For RSA PEM keys, select `{ hash: "SHA-512", ec: "DSA", rsa: "RSA-PSS" }` in the signing source `defaults`. Existing RSA defaults are unchanged. Native RSA-PSS CryptoKeys must already bind SHA-512. Signing and verification use exactly 64 salt bytes and WebCrypto MGF1/SHA-512, as required by [RFC 9421 section 3.3.1](https://www.rfc-editor.org/rfc/rfc9421.html#section-3.3.1). Restricted PSS SPKI/PKCS#8 parameters are checked before normalization: SHA-512, MGF1/SHA-512, trailer 1, and a minimum salt length no greater than 64. Absent parameters impose no restrictions; omitted hash/MGF fields in present parameters default to SHA-1 and are rejected. RSA-OAEP keys are not signature keys.
+
+### JSON Web Keys
+
+`importPublicJwk` and `importPrivateJwk` accept local `JsonWebKey` values; `importPublicKey`, `importPrivateKey`, and verification calls also accept them. Signing sources can use `{ keyId, privateKeyJwk }`. Supported keys are RSA, ECDSA P-256/P-384/P-521, and OKP Ed25519/Ed448 where the runtime supports them. Supported `alg` values are RS256/384/512, PS512, ES256/384/512, and EdDSA; nondefault signing hashes still require matching source defaults. `use`, `key_ops`, `ext`, declared algorithms and curve bindings are checked. Public imports reject private or symmetric material. No JWK URL or JWKS fetching is performed.

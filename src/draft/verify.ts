@@ -1,3 +1,4 @@
+import type { PublicKeySource } from '../types.js';
 import { ParsedDraftSignature } from "../types.js";
 import { parseAndImportPublicKey } from "../pem/spki.js";
 import { parseSignInfo } from "../shared/verify.js";
@@ -18,7 +19,7 @@ export const genSignInfoDraft = parseSignInfo;
  */
 export async function verifyDraftSignature(
 	parsed: ParsedDraftSignature['value'],
-	key: string | CryptoKey,
+	key: PublicKeySource,
 	errorLogger?: (message: any) => any
 ): Promise<boolean> {
 	try {
