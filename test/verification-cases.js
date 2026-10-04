@@ -8,7 +8,7 @@ export const verificationCaseNames = [
   'fallback import is isolated per signature algorithm', 'algorithm allowlist is respected',
   'missing algorithm requires an identified key', 'custom SFV parsing and verification',
   'native Fetch Request signing and verification', 'pre-imported RSA keys enforce algorithm and hash',
-  'RSA-PSS SHA-512 uses exactly 64 salt bytes', 'native JWK metadata and Ed25519 signing',
+  'RSA-PSS SHA-512 uses exactly 64 salt bytes', 'native JWK metadata and Ed25519 signing', 'Ed25519 public Multikey verification',
 ];
 
 function assert(value, message) {
@@ -161,6 +161,18 @@ export async function createVerificationCases(api, crypto) {
     for (const changes of [{ use: 'enc' }, { key_ops: ['sign'] }, { d: privateKeyJwk.d }, { alg: 'RS256' }]) {
       assert(!await api.verifyParsedSignature(parsed, { ...pub, ...changes }), 'Incompatible JWK accepted');
     }
+  };
+  cases['Ed25519 public Multikey verification'] = async () => {
+    const pair = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+    const raw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
+    const bytes = new Uint8Array([0xed, 1, ...raw]);
+    let value = BigInt('0x' + Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join(''));
+    let encoded = '';
+    const alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+    while (value) { encoded = alphabet[Number(value % 58n)] + encoded; value /= 58n; }
+    const request = { method: 'GET', url: 'https://example.com/multikey?q=1', headers: { Host: 'example.com' } };
+    await api.signAsRFC9421ToRequestOrResponse(request, { multi: { key: { keyId: 'multi', privateKey: pair.privateKey }, identifiers: ['@method', '@target-uri'] } });
+    assert(await api.verifyParsedSignature(api.parseRequestSignature(request), 'z' + encoded), 'Multikey verification failed');
   };
   return cases;
 }

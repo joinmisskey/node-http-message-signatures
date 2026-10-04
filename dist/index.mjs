@@ -595,6 +595,195 @@ var require_dist = __commonJS({
   }
 });
 
+// src/pem/der.ts
+function readDer(data, offset = 0) {
+  const start = offset;
+  if (offset + 2 > data.length)
+    throw new Error("Truncated DER");
+  const tag = data[offset++];
+  if ((tag & 31) === 31)
+    throw new Error("Unsupported DER tag");
+  let length = data[offset++];
+  if (length & 128) {
+    const count = length & 127;
+    if (!count || count > 4 || offset + count > data.length || data[offset] === 0)
+      throw new Error("Invalid DER length");
+    length = 0;
+    for (let i = 0; i < count; i++)
+      length = length * 256 + data[offset++];
+    if (length < 128)
+      throw new Error("Nonminimal DER length");
+  }
+  const end = offset + length;
+  if (end > data.length)
+    throw new Error("Truncated DER content");
+  return { tag, content: data.subarray(offset, end), encoded: data.subarray(start, end), end };
+}
+function derChildren(data) {
+  const children = [];
+  for (let offset = 0; offset < data.length; ) {
+    const child = readDer(data, offset);
+    children.push(child);
+    offset = child.end;
+  }
+  return children;
+}
+function derSequence(data) {
+  if (data.length > 1024 * 1024)
+    throw new Error("Key DER exceeds size limit");
+  const root = readDer(data);
+  if (root.tag !== 48 || root.end !== data.length)
+    throw new Error("Expected one DER sequence");
+  return derChildren(root.content);
+}
+function unsignedDerInteger(element, allowZero = false) {
+  const bytes = element.content;
+  if (element.tag !== 2 || !bytes.length || bytes[0] & 128)
+    throw new Error("Expected nonnegative DER integer");
+  if (bytes.length > 1 && bytes[0] === 0 && !(bytes[1] & 128))
+    throw new Error("Nonminimal DER integer");
+  if (!allowZero && bytes.every((value) => value === 0))
+    throw new Error("Expected positive DER integer");
+  return bytes;
+}
+
+// src/pem/pkcs1.ts
+import { ASN1 } from "@lapo/asn1js";
+var Pkcs1ParseError = class extends Error {
+  constructor(message) {
+    super(message);
+  }
+};
+function parsePkcs1(input) {
+  const parsed = ASN1.decode(decodePem(input));
+  if (!parsed.sub || parsed.sub.length !== 2)
+    throw new Pkcs1ParseError("Invalid SPKI (invalid sub length)");
+  const modulus = parsed.sub[0];
+  const publicExponent = parsed.sub[1];
+  if (!modulus || modulus.tag.tagNumber !== 2)
+    throw new Pkcs1ParseError("Invalid SPKI (invalid modulus)");
+  if (!publicExponent || publicExponent.tag.tagNumber !== 2)
+    throw new Pkcs1ParseError("Invalid SPKI (invalid publicExponent)");
+  return {
+    pkcs1: asn1ToArrayBuffer(parsed),
+    modulus: (asn1ToArrayBuffer(modulus, true).byteLength - 1) * 8,
+    publicExponent: parseInt(publicExponent.content() || "0")
+  };
+}
+var rsaASN1AlgorithmIdentifier = Uint8Array.from([
+  48,
+  13,
+  6,
+  9,
+  42,
+  134,
+  72,
+  134,
+  247,
+  13,
+  1,
+  1,
+  1,
+  // 1.2.840.113549.1.1.1
+  5,
+  0
+]);
+function genSpkiFromPkcs1(input) {
+  const { pkcs1 } = parsePkcs1(input);
+  const pkcsLength = genASN1Length(pkcs1.byteLength + 1);
+  const rootContent = Uint8Array.from([
+    ...rsaASN1AlgorithmIdentifier,
+    3,
+    ...pkcsLength,
+    // BIT STRING
+    0,
+    ...new Uint8Array(pkcs1)
+  ]);
+  return Uint8Array.from([
+    48,
+    ...genASN1Length(rootContent.length),
+    // SEQUENCE
+    ...rootContent
+  ]);
+}
+function parsePkcs1PrivateKey(input) {
+  try {
+    if (typeof input === "string" && /ENCRYPTED|Proc-Type:|DEK-Info:/.test(input))
+      throw new Error("Encrypted private keys are unsupported");
+    const decoded = decodePem(input);
+    const data = typeof decoded === "object" && "enc" in decoded ? decoded.enc : decoded;
+    const bytes = typeof data === "string" ? Uint8Array.from(data, (char) => char.charCodeAt(0)) : data instanceof Uint8Array ? data : data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data);
+    const fields = derSequence(bytes);
+    if (fields.length !== 9)
+      throw new Error("Expected nine two-prime RSA fields");
+    const version = unsignedDerInteger(fields[0], true);
+    if (version.length !== 1 || version[0] !== 0)
+      throw new Error("Only two-prime version 0 is supported");
+    for (const field of fields.slice(1))
+      unsignedDerInteger(field);
+    return { pkcs1: new Uint8Array(bytes).buffer };
+  } catch (error) {
+    throw new Pkcs1ParseError(`Invalid PKCS#1 private key: ${error.message}`);
+  }
+}
+function genPkcs8FromPkcs1(input) {
+  const { pkcs1 } = parsePkcs1PrivateKey(input);
+  const content = Uint8Array.from([
+    2,
+    1,
+    0,
+    ...rsaASN1AlgorithmIdentifier,
+    4,
+    ...genASN1Length(pkcs1.byteLength),
+    ...new Uint8Array(pkcs1)
+  ]);
+  return Uint8Array.from([48, ...genASN1Length(content.length), ...content]);
+}
+
+// src/pem/multikey.ts
+var alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+function decodePublicMultikey(input) {
+  if (!input.startsWith("z") || input.length < 2 || input.length > 8192)
+    throw new Error("Invalid or oversized public Multikey");
+  let value = 0n;
+  for (const char of input.slice(1)) {
+    const digit = alphabet.indexOf(char);
+    if (digit < 0)
+      throw new Error("Invalid base58btc character");
+    value = value * 58n + BigInt(digit);
+  }
+  const bytes = [];
+  while (value) {
+    bytes.push(Number(value & 255n));
+    value >>= 8n;
+  }
+  bytes.reverse();
+  let leadingZeroes = 0;
+  for (const char of input.slice(1)) {
+    if (char !== "1")
+      break;
+    leadingZeroes++;
+  }
+  const decoded = Uint8Array.from([...new Array(leadingZeroes).fill(0), ...bytes]);
+  if (decoded[0] === 237 && decoded[1] === 1) {
+    if (decoded.length !== 34)
+      throw new Error("Ed25519 Multikey requires 32 public bytes");
+    return Uint8Array.from([48, 42, 48, 5, 6, 3, 43, 101, 112, 3, 33, 0, ...decoded.subarray(2)]);
+  }
+  if (decoded[0] === 133 && decoded[1] === 36) {
+    const key = decoded.subarray(2);
+    if (key.length > 4096)
+      throw new Error("RSA Multikey exceeds size limit");
+    const fields = derSequence(key);
+    if (fields.length !== 2)
+      throw new Error("RSA Multikey requires a PKCS#1 public key");
+    for (const field of fields)
+      unsignedDerInteger(field);
+    return genSpkiFromPkcs1(key);
+  }
+  throw new Error("Unsupported or secret Multikey codec");
+}
+
 // src/draft/const.ts
 var keyHashAlgosForDraftEncofing = {
   "SHA": "sha1",
@@ -881,151 +1070,6 @@ async function importPrivateJwk(jwk, keyUsages = ["sign"], defaults = defaultSig
   return (await importSignatureJwk(jwk, true, keyUsages, defaults, extractable)).key;
 }
 
-// src/pem/der.ts
-function readDer(data, offset = 0) {
-  const start = offset;
-  if (offset + 2 > data.length)
-    throw new Error("Truncated DER");
-  const tag = data[offset++];
-  if ((tag & 31) === 31)
-    throw new Error("Unsupported DER tag");
-  let length = data[offset++];
-  if (length & 128) {
-    const count = length & 127;
-    if (!count || count > 4 || offset + count > data.length || data[offset] === 0)
-      throw new Error("Invalid DER length");
-    length = 0;
-    for (let i = 0; i < count; i++)
-      length = length * 256 + data[offset++];
-    if (length < 128)
-      throw new Error("Nonminimal DER length");
-  }
-  const end = offset + length;
-  if (end > data.length)
-    throw new Error("Truncated DER content");
-  return { tag, content: data.subarray(offset, end), encoded: data.subarray(start, end), end };
-}
-function derChildren(data) {
-  const children = [];
-  for (let offset = 0; offset < data.length; ) {
-    const child = readDer(data, offset);
-    children.push(child);
-    offset = child.end;
-  }
-  return children;
-}
-function derSequence(data) {
-  if (data.length > 1024 * 1024)
-    throw new Error("Key DER exceeds size limit");
-  const root = readDer(data);
-  if (root.tag !== 48 || root.end !== data.length)
-    throw new Error("Expected one DER sequence");
-  return derChildren(root.content);
-}
-function unsignedDerInteger(element, allowZero = false) {
-  const bytes = element.content;
-  if (element.tag !== 2 || !bytes.length || bytes[0] & 128)
-    throw new Error("Expected nonnegative DER integer");
-  if (bytes.length > 1 && bytes[0] === 0 && !(bytes[1] & 128))
-    throw new Error("Nonminimal DER integer");
-  if (!allowZero && bytes.every((value) => value === 0))
-    throw new Error("Expected positive DER integer");
-  return bytes;
-}
-
-// src/pem/pkcs1.ts
-import { ASN1 } from "@lapo/asn1js";
-var Pkcs1ParseError = class extends Error {
-  constructor(message) {
-    super(message);
-  }
-};
-function parsePkcs1(input) {
-  const parsed = ASN1.decode(decodePem(input));
-  if (!parsed.sub || parsed.sub.length !== 2)
-    throw new Pkcs1ParseError("Invalid SPKI (invalid sub length)");
-  const modulus = parsed.sub[0];
-  const publicExponent = parsed.sub[1];
-  if (!modulus || modulus.tag.tagNumber !== 2)
-    throw new Pkcs1ParseError("Invalid SPKI (invalid modulus)");
-  if (!publicExponent || publicExponent.tag.tagNumber !== 2)
-    throw new Pkcs1ParseError("Invalid SPKI (invalid publicExponent)");
-  return {
-    pkcs1: asn1ToArrayBuffer(parsed),
-    modulus: (asn1ToArrayBuffer(modulus, true).byteLength - 1) * 8,
-    publicExponent: parseInt(publicExponent.content() || "0")
-  };
-}
-var rsaASN1AlgorithmIdentifier = Uint8Array.from([
-  48,
-  13,
-  6,
-  9,
-  42,
-  134,
-  72,
-  134,
-  247,
-  13,
-  1,
-  1,
-  1,
-  // 1.2.840.113549.1.1.1
-  5,
-  0
-]);
-function genSpkiFromPkcs1(input) {
-  const { pkcs1 } = parsePkcs1(input);
-  const pkcsLength = genASN1Length(pkcs1.byteLength + 1);
-  const rootContent = Uint8Array.from([
-    ...rsaASN1AlgorithmIdentifier,
-    3,
-    ...pkcsLength,
-    // BIT STRING
-    0,
-    ...new Uint8Array(pkcs1)
-  ]);
-  return Uint8Array.from([
-    48,
-    ...genASN1Length(rootContent.length),
-    // SEQUENCE
-    ...rootContent
-  ]);
-}
-function parsePkcs1PrivateKey(input) {
-  try {
-    if (typeof input === "string" && /ENCRYPTED|Proc-Type:|DEK-Info:/.test(input))
-      throw new Error("Encrypted private keys are unsupported");
-    const decoded = decodePem(input);
-    const data = typeof decoded === "object" && "enc" in decoded ? decoded.enc : decoded;
-    const bytes = typeof data === "string" ? Uint8Array.from(data, (char) => char.charCodeAt(0)) : data instanceof Uint8Array ? data : data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data);
-    const fields = derSequence(bytes);
-    if (fields.length !== 9)
-      throw new Error("Expected nine two-prime RSA fields");
-    const version = unsignedDerInteger(fields[0], true);
-    if (version.length !== 1 || version[0] !== 0)
-      throw new Error("Only two-prime version 0 is supported");
-    for (const field of fields.slice(1))
-      unsignedDerInteger(field);
-    return { pkcs1: new Uint8Array(bytes).buffer };
-  } catch (error) {
-    throw new Pkcs1ParseError(`Invalid PKCS#1 private key: ${error.message}`);
-  }
-}
-function genPkcs8FromPkcs1(input) {
-  const { pkcs1 } = parsePkcs1PrivateKey(input);
-  const content = Uint8Array.from([
-    2,
-    1,
-    0,
-    ...rsaASN1AlgorithmIdentifier,
-    4,
-    ...genASN1Length(pkcs1.byteLength),
-    ...new Uint8Array(pkcs1)
-  ]);
-  return Uint8Array.from([48, ...genASN1Length(content.length), ...content]);
-}
-
 // src/pem/pss.ts
 var sha512Oid = [96, 134, 72, 1, 101, 3, 4, 2, 3];
 var mgf1Oid = [42, 134, 72, 134, 247, 13, 1, 1, 8];
@@ -1186,6 +1230,8 @@ function parseSpki(input) {
   };
 }
 function parsePublicKey(input) {
+  if (typeof input === "string" && input.startsWith("z"))
+    return parseSpki(decodePublicMultikey(input));
   try {
     return parseSpki(input);
   } catch (e) {
@@ -2786,6 +2832,7 @@ export {
   convertSignatureParamsDictionary,
   correctHeadersFromFlatArray,
   decodePem,
+  decodePublicMultikey,
   defaultSignInfoDefaults,
   digestHeaderRegEx,
   encodeArrayBufferToBase64,

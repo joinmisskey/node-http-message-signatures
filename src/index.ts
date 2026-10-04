@@ -31,3 +31,4 @@ export * from './pem/pkcs1.js';
 export * from './pem/pkcs8.js';
 
 export * from './pem/jwk.js';
+export * from './pem/multikey.js';

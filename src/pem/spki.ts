@@ -1,3 +1,4 @@
+import { decodePublicMultikey } from './multikey.js';
 import { importPublicJwk, importSignatureJwk } from './jwk.js';
 import { normalizePssContainer } from './pss.js';
 import { ASN1 } from '@lapo/asn1js';
@@ -183,6 +184,7 @@ export function parseSpki(input: ASN1.StreamOrBinary): SpkiParsedAlgorithmIdenti
  * @returns parsed object
  */
 export function parsePublicKey(input: ASN1.StreamOrBinary): SpkiParsedAlgorithmIdentifier {
+	if (typeof input === 'string' && input.startsWith('z')) return parseSpki(decodePublicMultikey(input));
 	try {
 		// Try to parse as SPKI
 		return parseSpki(input);

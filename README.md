@@ -151,3 +151,7 @@ For RSA PEM keys, select `{ hash: "SHA-512", ec: "DSA", rsa: "RSA-PSS" }` in the
 ### JSON Web Keys
 
 `importPublicJwk` and `importPrivateJwk` accept local `JsonWebKey` values; `importPublicKey`, `importPrivateKey`, and verification calls also accept them. Signing sources can use `{ keyId, privateKeyJwk }`. Supported keys are RSA, ECDSA P-256/P-384/P-521, and OKP Ed25519/Ed448 where the runtime supports them. Supported `alg` values are RS256/384/512, PS512, ES256/384/512, and EdDSA; nondefault signing hashes still require matching source defaults. `use`, `key_ops`, `ext`, declared algorithms and curve bindings are checked. Public imports reject private or symmetric material. No JWK URL or JWKS fetching is performed.
+
+### Public Multikey strings
+
+Public-key string inputs recognize bounded `z`/base58btc Multikey encodings: Ed25519 (`ed01` plus exactly 32 bytes) and RSA (`8524` plus a strict PKCS#1 public DER structure). `decodePublicMultikey` exposes the corresponding SPKI bytes. Secret, unknown or noncanonical codecs, invalid lengths and malformed RSA are rejected without PEM fallback. Inputs are limited to 8192 characters and RSA DER to 4096 bytes. Other encodings and compressed EC codecs are outside this initial scope. These formats cover Ed25519 and legacy RSA federation keys; see [FEP-521a](https://codeberg.org/fediverse/fep/src/branch/main/fep/521a/fep-521a.md) and the [multicodec registry](https://github.com/multiformats/multicodec/blob/master/table.csv).
