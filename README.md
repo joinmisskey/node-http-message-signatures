@@ -156,7 +156,44 @@ For RSA PEM keys, select `{ hash: "SHA-512", ec: "DSA", rsa: "RSA-PSS" }` in the
 
 ### Public Multikey strings
 
-Public-key string inputs recognize bounded `z`/base58btc Multikey encodings: Ed25519 (`ed01` plus exactly 32 bytes) and RSA (`8524` plus a strict PKCS#1 public DER structure). `decodePublicMultikey` exposes the corresponding SPKI bytes. Secret, unknown or noncanonical codecs, invalid lengths and malformed RSA are rejected without PEM fallback. Inputs are limited to 8192 characters and RSA DER to 4096 bytes. Other encodings and compressed EC codecs are outside this initial scope. These formats cover Ed25519 and legacy RSA federation keys; see [FEP-521a](https://codeberg.org/fediverse/fep/src/branch/main/fep/521a/fep-521a.md) and the [multicodec registry](https://github.com/multiformats/multicodec/blob/master/table.csv).
+`PublicKeySource` accepts a public Multikey's `publicKeyMultibase` **string**, alongside PEM strings, CryptoKeys and local JWKs. This applies to `importPublicKey`, `parseAndImportPublicKey`, and the existing verification/key-resolver APIs. Passing an Actor or a whole Multikey document is not supported.
+
+Supported values use `z`/base58btc with canonical multicodec prefixes:
+
+- Ed25519 public key: codec `0xed`, encoded prefix bytes `ed 01`, followed by exactly 32 public-key bytes.
+- RSA public key: codec `0x1205`, encoded prefix bytes `85 24`, followed by strict PKCS#1 public DER (at most 4096 bytes).
+
+The complete encoded string is limited to 8192 characters. Secret/unknown codecs, noncanonical prefixes, invalid lengths and malformed RSA are rejected without PEM fallback. Other multibase encodings and compressed EC codecs are unsupported. `decodePublicMultikey` exposes the corresponding SPKI bytes. See [FEP-521a](https://codeberg.org/fediverse/fep/src/branch/main/fep/521a/fep-521a.md) and the [multicodec registry](https://github.com/multiformats/multicodec/blob/master/table.csv) for the formats.
+
+An application can extract these strings from an actor's `assertionMethod`. It must first authenticate/authorize the actor document for the expected actor identity, confirm that the selected key belongs to that actor's assertion methods, and validate the key's `controller` and exact signature `keyId`. Matching strings in an untrusted document does not establish ownership. The application owns fetching, referenced-key dereferencing, redirect/SSRF policy, caching and key lifetime; the library does not fetch or resolve Actors automatically.
+
+For example, using an already authorized actor document with an embedded Multikey (the public key below is a valid Ed25519 example):
+
+```ts
+import { parseRequestSignature, verifyParsedSignature } from '@misskey-dev/node-http-message-signatures';
+
+// Fixture: in an application, obtain this document through your trusted actor-resolution policy.
+const actor = {
+  id: 'https://social.example/users/alice',
+  assertionMethod: [{
+    id: 'https://social.example/users/alice#ed25519-key',
+    type: 'Multikey',
+    controller: 'https://social.example/users/alice',
+    publicKeyMultibase: 'z6Mkf5rGMoatrSj1f4CyvuHBeXJELe9RPdzo2PKGNCKVtZxP',
+  }],
+};
+const expectedActorId = 'https://social.example/users/alice'; // Authorized message sender.
+if (actor.id !== expectedActorId) throw new Error('Unexpected actor');
+const valid = await verifyParsedSignature(parseRequestSignature(incomingRequest), {
+  resolveKey: async ({ keyId }) => {
+    const key = actor.assertionMethod.find(entry => entry.id === keyId);
+    if (!key || key.type !== 'Multikey' || key.controller !== expectedActorId) return undefined;
+    return key.publicKeyMultibase;
+  },
+});
+```
+
+The resolver returns the extracted string, not `actor` or `key`. For referenced assertion methods, resolve and authorize the referenced key in application code before this step. Multikey decoding alone does not implement FEP-521a/Actor processing, verify a data-integrity proof, or select the HTTP signature protocol: draft/RFC 9421 parsing, required-component/time checks and body-digest validation remain separate. No experimental implementation-level marker is required by this key-input API.
 
 ### Signature backends and asynchronous key resolution
 
