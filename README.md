@@ -1,9 +1,9 @@
 @misskey-dev/node-http-message-signatures
 ----
 
-Implementation of [HTTP Signatures "Draft", RFC 9421](https://datatracker.ietf.org/doc/rfc9421/), [RFC 3230](https://datatracker.ietf.org/doc/rfc3230/) and [RFC 9530](https://datatracker.ietf.org/doc/rfc9530/) for JavaScript.
+A JavaScript library for signing and verifying HTTP messages using legacy HTTP Signatures ("Draft") and [RFC 9421](https://datatracker.ietf.org/doc/rfc9421/), with body-digest support for [RFC 3230](https://datatracker.ietf.org/doc/rfc3230/) and [RFC 9530](https://datatracker.ietf.org/doc/rfc9530/).
 
-We initially started working on it with the intention of using it in Node.js, but since we rewrote it to Web Crypto API, it may also work in browsers and edge workers.
+The default backend uses the Web Crypto API in Node.js, browsers and compatible edge runtimes. Algorithm availability depends on the runtime. Custom signing, verification and key-resolution hooks support application-owned backends; an optional Node.js adapter supports slacc.
 
 It was created for Misskey's ActivityPub implementation by the original authors, including mei23 and tamaina.
 
@@ -13,24 +13,22 @@ See [RELEASING.md](./RELEASING.md) for build, test, and release preparation.
 
 ## Context
 ### HTTP Signatures "Draft" and RFC 9421
-[RFC 9421](https://datatracker.ietf.org/doc/rfc9421/) is the standard used for signing HTTP communications, but has been used since draft in the world of ActivityPub server-to-server communications with Misskey, Mastodon, and others.
-The title "HTTP Signatures" in the draft was changed to "HTTP Message Signatures" in the RFC.
+[RFC 9421](https://datatracker.ietf.org/doc/rfc9421/) standardizes HTTP Message Signatures. Earlier HTTP Signatures drafts are still used by applications such as ActivityPub servers.
 
-This library allows both the draft and RFC to be used.
+
+This library provides separate APIs for the legacy draft format and RFC 9421. Applications must select the format supported by their peers; the formats are not interchangeable.
 
 ### RFC 3230 and RFC 9530
 [RFC 3230](https://datatracker.ietf.org/doc/rfc3230/) and [RFC 9530](https://datatracker.ietf.org/doc/rfc9530/) are standards used for expressing the digest of the body of an HTTP communication. RFC 9530 was released at the same time as RFC 9421 and obsoletes RFC 3230.
 
-Since ActivityPub also needs digest validation, this library also implements functions to create and validate digests.
+The library provides functions to create and validate both digest formats. Body-digest validation is separate from signature verification.
 
 ## Comparison
 ### With http-signature
-Previously, we used `http-signature` (`@peertube/http-signature` to be exact) to parse and verify (Draft) signatures, and this library replaces those implementations as well.
-
-This is because `TritonDataCenter/node-sshpk` (formerly `joient/node-sshpk`), on which http-signature depends, is slower than `crypto`.
+This library supports parsing and verifying legacy draft signatures, as well as RFC 9421 signatures, using Web Crypto rather than the `sshpk` backend used by `http-signature`. It is not a drop-in replacement: review the request representation, algorithm policy and key-selection behavior when migrating. Performance depends on the runtime, algorithm and workload.
 
 ## ActivityPub Compatibility
-One of the motivations for creating this package is to make Misskey compatible with the Ed25519 signature instead of RSA. In doing so, there is a need to ensure compatibility.
+ActivityPub applications can use this library with RSA or Ed25519 keys, subject to peer support. Key discovery, identity authorization and protocol negotiation remain application responsibilities. The following sections describe an experimental capability convention; they are not requirements for using the library.
 
 ### HTTP Message Signatures Implementation Level
 
@@ -50,15 +48,13 @@ Here, `x1` means `01` or `11`, and `x2` means `02` or `12`; neither `x1` nor `x2
 |`11`|RFC 9421, RFC 9530|Deprecated x1 `additionalPublicKeys` proposal|
 |`12`|RFC 9421, RFC 9530|x2 `assertionMethod` / `Multikey`, RSA and Ed25519|
 
-The revised, unmerged [Misskey PR #16250](https://github.com/misskey-dev/misskey/pull/16250), as checked at [commit a572af4](https://github.com/tamaina/misskey/blob/a572af46f993db9c706567ed74fcb9ed7b02ee8c/packages/backend/docs/activitypub-signature-keys.md), advertises `02` in NodeInfo. Its outgoing HTTP signatures remain draft signatures: it selects an existing Ed25519 key only for an exact peer marker of `02`, otherwise falling back to RSA. This includes deprecated `01` / `11`, RFC-family `10` / `11` / `12`, missing or unknown values, and an unavailable local Ed25519 key. A peer's `12` claim does not enable RFC 9421 sending in that implementation.
-
-Stored remote `01` / `11` values are not rewritten to `02` / `12`. A successful NodeInfo refetch records the peer's actual advertisement; retaining historical JSON-LD normalization for `additionalPublicKeys` does not advertise x1 support. Match recognized markers exactly rather than comparing them numerically or lexically.
+Applications using this convention should match recognized markers exactly rather than compare them numerically or lexically. Select only signature formats and key types supported by both peers. For example, a draft-only sender must not treat a peer's `12` advertisement as support for draft Ed25519 signatures. Missing, unknown or deprecated markers require an application-defined compatibility policy; do not silently reinterpret stored x1 values as x2 support.
 
 This marker describes application capabilities. The library supports explicit draft and RFC 9421 APIs but does not fetch NodeInfo, negotiate a marker, authorize Actor keys, or implement full FEP-521a/Data Integrity processing automatically. Changing the key-publication dimension alone does not change the signature/digest family.
 
 ### `assertionMethod` / `Multikey` (x2)
 
-The revised proposal publishes public keys as embedded `assertionMethod` entries with `type: "Multikey"`, an exact Actor ID `controller`, and a `publicKeyMultibase` string. It uses the `https://www.w3.org/ns/cid/v1` context. RSA uses the `rsa-pub` multicodec with PKCS#1 public DER; Ed25519 uses `ed25519-pub` with 32 public-key bytes. The legacy RSA `publicKey` / `publicKeyPem` remains available for compatibility, using the same existing `#main-key` identity; the Ed25519 key uses `#ed25519-key`.
+Applications using the x2 convention publish public keys as embedded `assertionMethod` entries with `type: "Multikey"`, an exact Actor ID `controller`, and a `publicKeyMultibase` string. Include the `https://www.w3.org/ns/cid/v1` context for this representation. RSA uses the `rsa-pub` multicodec with PKCS#1 public DER; Ed25519 uses `ed25519-pub` with 32 public-key bytes. Applications may also retain a legacy RSA `publicKey` / `publicKeyPem` for peer compatibility. Key IDs and fragment names are application-defined; the example below uses `#ed25519-key`.
 
 ```json
 {
@@ -81,7 +77,7 @@ This example shows an embedded Ed25519 key. See [Public Multikey strings](#publi
 
 ### `additionalPublicKeys`
 
-The older, withdrawn proposal used an `additionalPublicKeys` array of [legacy publicKey objects](https://docs.joinmastodon.org/spec/activitypub/#publicKey) with `owner` and `publicKeyPem`. It is deprecated, not an alternative name for `assertionMethod`. The revised Misskey PR neither emits it in new Actors nor uses it for Actor key discovery; the historical JSON-LD alias is retained only to preserve canonical bytes for previously signed or queued documents. Use the [x2 representation](#assertionmethod--multikey-x2) for the revised proposal.
+The older, withdrawn proposal used an `additionalPublicKeys` array of [legacy publicKey objects](https://docs.joinmastodon.org/spec/activitypub/#publicKey) with `owner` and `publicKeyPem`. It is deprecated, not an alternative name for `assertionMethod`. Use the [x2 representation](#assertionmethod--multikey-x2) for new integrations. Applications migrating existing data should consider whether historical JSON-LD contexts must be retained to verify previously signed documents; this compatibility handling is outside the library.
 
 ## Usage
 
@@ -91,7 +87,7 @@ npm install @misskey-dev/node-http-message-signatures
 ```
 
 ### Parse and verify
-Parse and verify in fastify web server, implements ActivityPub inbox
+Example: parse and verify a request in a Fastify server.
 
 See [the usage (parse-and-verify-fastify.ts)](./test/unit/readme-usage/parse-and-verify-fastify.ts)
 
@@ -122,34 +118,6 @@ parseRequestSignature(request, {
   additionalSfvTypeDictionary: { 'x-example': 'dict' },
 });
 ```
-
-## Development checks
-
-```sh
-pnpm install --frozen-lockfile
-pnpm eslint
-pnpm build
-pnpm run test --runInBand
-pnpm run test:browser
-```
-
-CI tests Node 22 and 24 (supported LTS) and Node 26 (Current). Lint and browser jobs use Node 24. This CI coverage does not change the package engines compatibility declaration.
-
-The browser runner needs Node 22+ and Chrome available as `google-chrome`
-(or set `CHROME_BIN`). It extends the earlier Chrome query regression harness,
-using a temporary isolated profile and localhost server, then removes them.
-The same verification cases run under Jest and native Chrome Web Crypto in the
-main thread and a dedicated worker. They cover independent ECDSA P-256/P-384
-signatures, PEM/CryptoKey verification, candidate selection, malformed/mixed keys,
-allowlists, custom SFV, native Fetch Request signing, and draft RSA/Ed25519 query
-regressions. Unsupported optional Ed25519 is reported as skipped. Firefox, Safari,
-and Service Worker lifecycle/network integration are not covered by this harness.
-
-The ECDSA/SFV corrections adapt Yuanyuan (Li-Yuanyuan)'s
-[upstream PR #20](https://github.com/misskey-dev/node-http-message-signatures/pull/20),
-with corrected algorithm propagation and key selection. The JSON example
-indentation comes from Pichu Chen (PichuChen)'s
-[upstream PR #19](https://github.com/misskey-dev/node-http-message-signatures/pull/19).
 
 ### PKCS#1 private keys
 
@@ -249,16 +217,16 @@ Keys are explicit PEM strings, Uint8Array/Buffer DER, or ArrayBuffer DER. Unencr
 
 The verifier closes over one trusted public key and requires a **keyless context**. Use `{ verifier }` with no `keys`/`resolveKey`; supplying a CryptoKey in the context is rejected. High-level keyless verification requires an explicit, unambiguous wire algorithm; use the existing keyed WebCrypto path for omitted `alg` or ambiguous draft `hs2019`. A multi-key application must route by trusted key ID/label to the appropriate verifier itself and enforce identity authorization. No key lookup or network access is performed. Unsupported operations throw; callback errors propagate, false verification remains false, and there is no automatic backend fallback. If needed, callers explicitly route other operations to `webCryptoVerifier` before invoking an adapter.
 
-The investigated `tamaina/misskey` `p1-3` branch currently uses slacc 0.1.5. Applications using that API must upgrade their own slacc dependency to **0.2.0** before using these adapters; 0.1.5 compatibility is not provided. Direct `RsaKeyPair` consumers, including Misskey's `JsonLdService`, must migrate to `Signer.fromPkcs8Pem(...).signRaw()` while preserving their existing input bytes. Keep the application's existing single startup initialization and key-cache lifecycle. Select the validated actor key's algorithm on a cache miss, then reuse the returned `CustomSigningKey` for either RSA or Ed25519:
+These adapters target slacc **0.2.0**; the 0.1.5 `RsaKeyPair` API is not supported. Applications migrating from that API must update their own dependency and native signing calls. Initialize the shared pool once at application startup, then create and cache a signing key for the selected algorithm:
 
 ```ts
 import * as slacc from 'slacc'; // application-owned slacc 0.2.0
 import { createSlaccSigningKey } from '@misskey-dev/node-http-message-signatures/node/slacc';
 import { signAsDraftToRequest, parseRequestSignature, verifyParsedSignature } from '@misskey-dev/node-http-message-signatures';
 
-// Construct on a key-cache miss; actorAlgorithm is 'rsa-v1_5-sha256' or 'ed25519'.
+// Construct on a key-cache miss; keyAlgorithm is 'rsa-v1_5-sha256' or 'ed25519'.
 const signingKey = createSlaccSigningKey(slacc, {
-  keyId: actorKeyId, version: 'draft', algorithm: actorAlgorithm, privateKey: actorPrivateKeyPem,
+  keyId, version: 'draft', algorithm: keyAlgorithm, privateKey: privateKeyPem,
 });
 await signAsDraftToRequest(request, signingKey, ['(request-target)', 'host', 'date']);
 // Incoming verification can keep the existing WebCrypto path.
@@ -269,7 +237,34 @@ slacc's `init(threadCount)` must run once before signing/verifying; initializati
 
 Native tests execute slacc 0.2.0 in a separate process. Run the opt-in bounded benchmark with `pnpm performance:slacc`: it compares cold construction and warm reused handles with WebCrypto for RSA 2048/4096 and Ed25519 at concurrency 1/16, using one slacc thread by default. For a matched four-thread comparison, run `UV_THREADPOOL_SIZE=4 pnpm performance:slacc 4` in a fresh process. Results depend on workload and machine; no general speedup is promised. Browser and edge applications should import the main entry point, not the Node adapter.
 
-Populate the caller-owned key cache with the factory result, then pass it directly to `signAsDraftToRequest`. Bind cache identity to key material, key ID and signature version, and invalidate on rotation/refresh. Construction and PEM parsing happen on cache misses, not on each signature. Queue payloads remain PEM; reconstruct/cache the signing key in the worker. The adapter owns no global cache or thread pool.
+Populate the caller-owned key cache with the factory result, then pass it directly to `signAsDraftToRequest`. Bind cache identity to key material, key ID and signature version, and invalidate on rotation/refresh. Construction and PEM parsing happen on cache misses, not on each signature. When signing in background workers, choose an appropriate key representation or trusted key reference for the queue, then resolve and cache the signing key in the worker. The adapter owns no global cache or thread pool.
+
+## Development checks
+
+```sh
+pnpm install --frozen-lockfile
+pnpm eslint
+pnpm build
+pnpm run test --runInBand
+pnpm run test:browser
+```
+
+CI tests Node 22 and 24 (supported LTS) and Node 26 (Current). Lint and browser jobs use Node 24. This CI coverage does not change the package engines compatibility declaration.
+
+The browser runner needs Node 22+ and Chrome available as `google-chrome`
+(or set `CHROME_BIN`). It uses a temporary isolated profile and localhost server, then removes them.
+The same verification cases run under Jest and native Chrome Web Crypto in the
+main thread and a dedicated worker. They cover independent ECDSA P-256/P-384
+signatures, PEM/CryptoKey verification, candidate selection, malformed/mixed keys,
+allowlists, custom SFV, native Fetch Request signing, and draft RSA/Ed25519 query
+regressions. Unsupported optional Ed25519 is reported as skipped. Firefox, Safari,
+and Service Worker lifecycle/network integration are not covered by this harness.
+
+The ECDSA/SFV corrections adapt Yuanyuan (Li-Yuanyuan)'s
+[upstream PR #20](https://github.com/misskey-dev/node-http-message-signatures/pull/20),
+with corrected algorithm propagation and key selection. The JSON example
+indentation comes from Pichu Chen (PichuChen)'s
+[upstream PR #19](https://github.com/misskey-dev/node-http-message-signatures/pull/19).
 
 
 ## Building from source
