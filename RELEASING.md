@@ -66,15 +66,16 @@ npm view @misskey-dev/node-http-message-signatures versions dist-tags --json
 ```
 
 As of the 2026-10-05 release preflight, npm `latest` is publicly published
-`1.1.0`; `1.1.1` is absent from published versions. The user selected stable
-`1.1.1` and channel `latest` for README clarification of public Multikey inputs
-and application-owned `assertionMethod` resolution. No production source or
-runtime dependency changes are included. The release commit updates README,
+`1.1.1`; `1.1.2` is absent from published versions. The user selected stable
+`1.1.2` and channel `latest` for the README implementation-marker correction at
+`a7a7d2d8f9b2074832a701452a275811ef718ffd`: independent signature/key-discovery
+dimensions, deprecated x1, and assertionMethod/Multikey x2. No production source or
+runtime dependency changes are included. The release commit updates the
 package version and these instructions; `dist/` stays untracked and is generated
-during build/pack. Tag `v1.1.1` must point to that release commit.
+during build/pack. Tag `v1.1.2` must point to that release commit.
 
 Existing local npm access cannot list staged packages (`E401`). Repository tags,
-releases and staging-workflow history show no prior 1.1.1 attempt. Use the approved
+releases and staging-workflow history show no prior 1.1.2 attempt. Use the approved
 existing OIDC workflow once; its authenticated result is authoritative. If it
 reports an existing staged version, stop without replacing it or retrying staging.
 Do not change credentials to bypass the failed lookup. Read registry and staging
@@ -93,7 +94,7 @@ to inspect the intended payload without publishing. Keep the scope unchanged.
 The selected release method is npm OIDC **staged publishing**. The workflow
 `.github/workflows/npm-publish.yml` stages only; it never directly publishes,
 approves a staged package, or executes `npm dist-tag`. The selected package version is
-`1.1.1`, and the npm name remains `@misskey-dev/node-http-message-signatures`.
+`1.1.2`, and the npm name remains `@misskey-dev/node-http-message-signatures`.
 
 The owner registers the Trusted Publisher in npm package settings with:
 
@@ -120,9 +121,9 @@ use pnpm, while pack/dry-run/staging use npm.
 
 Before staging, check published versions and available Staged Packages/history;
 staged versions also reserve their version number. Follow the access-limited
-preflight and single-attempt rule above for this approved 1.1.1 release. The selected
+preflight and single-attempt rule above for this approved 1.1.2 release. The selected
 tag must reference the approved commit that includes this workflow and scripts.
-The user has approved the 1.1.1 GitHub Release and npm staging. Owner approval
+The user has approved the 1.1.2 GitHub Release and npm staging. Owner approval
 of the staged npm package remains a separate final action.
 
 Choose exactly one trigger for the approved version:
@@ -132,10 +133,10 @@ Choose exactly one trigger for the approved version:
   prerelease flag must match the package version.
 - Run the workflow manually from `main`, providing an existing reviewed
   `release_tag`, `dist_tag`, and `confirm_stage=true`. For example, after an
-  approved `v1.1.1` tag exists:
+  approved `v1.1.2` tag exists:
 
   ```sh
-  gh workflow run npm-publish.yml --repo joinmisskey/node-http-message-signatures --ref main -f release_tag=v1.1.1 -f dist_tag=latest -f confirm_stage=true
+  gh workflow run npm-publish.yml --repo joinmisskey/node-http-message-signatures --ref main -f release_tag=v1.1.2 -f dist_tag=latest -f confirm_stage=true
   ```
 
 Tags must be exactly the package version, with an optional `v` prefix. The job
@@ -149,8 +150,8 @@ supported. Release events derive the same channel from the version.
 The job runs the guard tests, frozen dependency install, lint, build, and unit
 tests. It packs one tarball, checks its expected filename, and runs
 `npm stage publish --dry-run` on it before staging **the same tarball**. For
-`1.1.1` the artifact is
-`misskey-dev-node-http-message-signatures-1.1.1.tgz`. Staging does not make that
+`1.1.2` the artifact is
+`misskey-dev-node-http-message-signatures-1.1.2.tgz`. Staging does not make that
 version publicly installable. Pushes and PR merges never trigger staging.
 
 ## Owner review and final publication
