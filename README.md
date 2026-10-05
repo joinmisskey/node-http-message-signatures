@@ -33,46 +33,55 @@ This is because `TritonDataCenter/node-sshpk` (formerly `joient/node-sshpk`), on
 One of the motivations for creating this package is to make Misskey compatible with the Ed25519 signature instead of RSA. In doing so, there is a need to ensure compatibility.
 
 ### HTTP Message Signatures Implementation Level
-As a way of expressing the HTTP Message Signatures support status of software, I propose to express it as an implementation level (`string` of two-digit numbers).
 
-~~Newer versions of Misskey have this string in `metadata.httpMessageSignaturesImplementationLevel` of nodeinfo.~~
+`metadata.httpMessageSignaturesImplementationLevel` in NodeInfo is an experimental two-character capability marker. Its positions describe independent dimensions; it is not a numeric version or an ordered level:
 
-|Level|Definition|
-|:-:|:--|
-|`00`|"Draft", RFC 3230, RSA-SHA256 Only|
-|`01`|"Draft", RFC 3230, Supports multiple public keys and Ed25519|
-|`10`|RFC 9421, RFC 9530, RSA-SHA256 Only|
-|`11`|RFC 9421, RFC 9530, Supports multiple public keys and Ed25519|
+- First character: `0` means HTTP Signatures "Draft" with RFC 3230 digests; `1` means RFC 9421 with RFC 9530 digests.
+- Second character: `0` means legacy RSA `publicKey` / `publicKeyPem`; `1` means the deprecated `additionalPublicKeys` proposal; `2` means RSA/Ed25519 keys published through `assertionMethod` / `Multikey`.
 
-### `additionalPublicKeys`
-Misskey added the `additionalPublicKeys` property to Actor to allow it to have multiple public keys. This is an array of [publicKey](https://docs.joinmastodon.org/spec/activitypub/#publicKey)s.
+Here, `x1` means `01` or `11`, and `x2` means `02` or `12`; neither `x1` nor `x2` is a literal NodeInfo value.
+
+|Marker|Signature / digest family|Key discovery|
+|:--:|:--|:--|
+|`00`|"Draft", RFC 3230|Legacy RSA `publicKey` / `publicKeyPem`|
+|`01`|"Draft", RFC 3230|Deprecated x1 `additionalPublicKeys` proposal|
+|`02`|"Draft", RFC 3230|x2 `assertionMethod` / `Multikey`, RSA and Ed25519|
+|`10`|RFC 9421, RFC 9530|Legacy RSA `publicKey` / `publicKeyPem`|
+|`11`|RFC 9421, RFC 9530|Deprecated x1 `additionalPublicKeys` proposal|
+|`12`|RFC 9421, RFC 9530|x2 `assertionMethod` / `Multikey`, RSA and Ed25519|
+
+The revised, unmerged [Misskey PR #16250](https://github.com/misskey-dev/misskey/pull/16250), as checked at [commit a572af4](https://github.com/tamaina/misskey/blob/a572af46f993db9c706567ed74fcb9ed7b02ee8c/packages/backend/docs/activitypub-signature-keys.md), advertises `02` in NodeInfo. Its outgoing HTTP signatures remain draft signatures: it selects an existing Ed25519 key only for an exact peer marker of `02`, otherwise falling back to RSA. This includes deprecated `01` / `11`, RFC-family `10` / `11` / `12`, missing or unknown values, and an unavailable local Ed25519 key. A peer's `12` claim does not enable RFC 9421 sending in that implementation.
+
+Stored remote `01` / `11` values are not rewritten to `02` / `12`. A successful NodeInfo refetch records the peer's actual advertisement; retaining historical JSON-LD normalization for `additionalPublicKeys` does not advertise x1 support. Match recognized markers exactly rather than comparing them numerically or lexically.
+
+This marker describes application capabilities. The library supports explicit draft and RFC 9421 APIs but does not fetch NodeInfo, negotiate a marker, authorize Actor keys, or implement full FEP-521a/Data Integrity processing automatically. Changing the key-publication dimension alone does not change the signature/digest family.
+
+### `assertionMethod` / `Multikey` (x2)
+
+The revised proposal publishes public keys as embedded `assertionMethod` entries with `type: "Multikey"`, an exact Actor ID `controller`, and a `publicKeyMultibase` string. It uses the `https://www.w3.org/ns/cid/v1` context. RSA uses the `rsa-pub` multicodec with PKCS#1 public DER; Ed25519 uses `ed25519-pub` with 32 public-key bytes. The legacy RSA `publicKey` / `publicKeyPem` remains available for compatibility, using the same existing `#main-key` identity; the Ed25519 key uses `#ed25519-key`.
 
 ```json
 {
   "@context": [
     "https://www.w3.org/ns/activitystreams",
-    "https://w3id.org/security/v1",
-      {
-        "Key": "sec:Key",
-        "additionalPublicKeys": "misskey:additionalPublicKeys"
-      }
+    "https://www.w3.org/ns/cid/v1"
   ],
-  "id": "https://misskey.io/users/7rkrarq81i",
+  "id": "https://social.example/users/alice",
   "type": "Person",
-  "publicKey": {
-    "id": "https://misskey.io/users/7rkrarq81i#main-key",
-    "type": "Key",
-    "owner": "https://misskey.io/users/7rkrarq81i",
-    "publicKeyPem": "-----BEGIN PUBLIC KEY-----..."
-  },
-  "additionalPublicKeys": [{
-    "id": "https://misskey.io/users/7rkrarq81i#ed25519-key",
-    "type": "Key",
-    "owner": "https://misskey.io/users/7rkrarq81i",
-    "publicKeyPem": "-----BEGIN PUBLIC KEY-----..."
+  "assertionMethod": [{
+    "id": "https://social.example/users/alice#ed25519-key",
+    "type": "Multikey",
+    "controller": "https://social.example/users/alice",
+    "publicKeyMultibase": "z6Mkf5rGMoatrSj1f4CyvuHBeXJELe9RPdzo2PKGNCKVtZxP"
   }]
 }
 ```
+
+This example shows an embedded Ed25519 key. See [Public Multikey strings](#public-multikey-strings) for supported codecs, limits, ownership checks and the library's string-input API. Referenced assertion methods require application-owned resolution and authorization.
+
+### `additionalPublicKeys`
+
+The older, withdrawn proposal used an `additionalPublicKeys` array of [legacy publicKey objects](https://docs.joinmastodon.org/spec/activitypub/#publicKey) with `owner` and `publicKeyPem`. It is deprecated, not an alternative name for `assertionMethod`. The revised Misskey PR neither emits it in new Actors nor uses it for Actor key discovery; the historical JSON-LD alias is retained only to preserve canonical bytes for previously signed or queued documents. Use the [x2 representation](#assertionmethod--multikey-x2) for the revised proposal.
 
 ## Usage
 
