@@ -1,4 +1,4 @@
-import { type SignInfoDefaults, encodeArrayBufferToBase64 } from '../utils.js';
+import { type SignInfoDefaults, encodeArrayBufferToBase64, setHeaderToRequestOrResponse } from '../utils.js';
 import { prepareSigningKey } from '../shared/backend.js';
 import { genSignature } from '../shared/sign.js';
 import { keyHashAlgosForDraftEncofing } from './const.js';
@@ -69,9 +69,7 @@ export async function signAsDraftToRequest(request: IncomingRequest, key: Privat
 	const signature = encodeArrayBufferToBase64(new Uint8Array(bytes).buffer);
 	const signatureHeader = genDraftSignatureHeader(includeHeaders, key.keyId, signature, algoString);
 
-	Object.assign(request.headers, {
-		Signature: signatureHeader,
-	});
+	setHeaderToRequestOrResponse(request, 'Signature', signatureHeader);
 
 	return {
 		signingString,

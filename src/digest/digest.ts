@@ -43,9 +43,9 @@ export async function verifyDigestHeader(
 	},
 	errorLogger?: ((message: any) => any)
 ) {
-	const failOnNoDigest = typeof opts === 'boolean' ? opts : opts.failOnNoDigest;
+	const failOnNoDigest = typeof opts === 'boolean' ? opts : opts.failOnNoDigest ?? true;
 	const algorithms = typeof opts === 'boolean' ? ['SHA-256', 'SHA-512'] satisfies DigestHashAlgorithm[] : opts.algorithms;
-	const verifyAll = typeof opts === 'boolean' ? true : opts.verifyAll;
+	const verifyAll = typeof opts === 'boolean' ? true : opts.verifyAll ?? true;
 	const headerKeys = new Set(Object.keys(collectHeaders(request)));
 
 	if (headerKeys.has('content-digest')) {

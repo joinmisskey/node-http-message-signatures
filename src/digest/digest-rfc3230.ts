@@ -35,7 +35,7 @@ export async function verifyRFC3230DigestHeader(
 	},
 	errorLogger?: ((message: any) => any)
 ) {
-	const failOnNoDigest = typeof opts === 'boolean' ? opts : opts.failOnNoDigest;
+	const failOnNoDigest = typeof opts === 'boolean' ? opts : opts.failOnNoDigest ?? true;
 	/**
 	 * UPPERCASED
 	 */

@@ -1,5 +1,6 @@
 // Shared native-Web-Crypto regressions for Jest, Chrome main thread and workers.
 export const verificationCaseNames = [
+  'draft Fetch headers are real request headers', 'RFC query coverage and canonical encoding',
   'implicit JWK operations preserve declared hashes',
   'implicit algorithm allowlist is respected',
   'P-256 PEM and CryptoKey', 'P-384 PEM and CryptoKey', 'label and keyid selection',
@@ -247,6 +248,27 @@ export async function createVerificationCases(api, crypto) {
         assert(await api.verifyDraftSignature(parsed, publicJwk) === (usedHash === hash), 'Draft implicit JWK hash mismatch: ' + alg);
       }
     }
+  };
+  cases['draft Fetch headers are real request headers'] = async () => {
+    const request = new Request('https://example.com/inbox?x=1', { method: 'POST', headers: { date: new Date().toUTCString() } });
+    const result = await api.signAsDraftToRequest(request, { keyId: 'rsa', privateKey: rsa.privateKey }, ['(request-target)', 'date']);
+    assert(request.headers.get('signature') === result.signatureHeader, 'Draft Signature must be a real Fetch header');
+    assert(await api.verifyParsedSignature(api.parseRequestSignature(request, { requiredComponents: { draft: ['date'] } }), rsa.publicKey), 'Draft Fetch signature must verify');
+  };
+  cases['RFC query coverage and canonical encoding'] = async () => {
+    const params = '("@method" "@request-target" "@query-param";name="item");keyid="rsa";alg="rsa-v1_5-sha256"';
+    const base = '"@method": POST\n"@request-target": /inbox?item=a%20b%0Ac\n"@query-param";name="item": a%20b%0Ac\n"@signature-params": ' + params;
+    const signature = await crypto.subtle.sign({ name: 'RSASSA-PKCS1-v1_5' }, rsa.privateKey, new TextEncoder().encode(base));
+    const request = new Request('https://example.com/inbox?item=a%20b%0Ac', { method: 'POST', headers: {
+      'Signature-Input': 'sig=' + params, Signature: 'sig=:' + api.encodeArrayBufferToBase64(signature) + ':',
+    } });
+    assert(await api.verifyParsedSignature(api.parseRequestSignature(request), rsa.publicKey), 'Independent canonical Fetch signature must verify');
+    const changed = new Request('https://example.com/inbox?item=other', { method: 'POST', headers: request.headers });
+    assert(!await api.verifyParsedSignature(api.parseRequestSignature(changed), rsa.publicKey), 'Changed target must fail verification');
+    const repeated = new Request('https://example.com/inbox?item=a%20b%0Ac&%69tem=other', { method: 'POST', headers: request.headers });
+    let rejected = false;
+    try { api.parseRequestSignature(repeated); } catch { rejected = true; }
+    assert(rejected, 'Repeated named parameter must fail parsing');
   };
   return cases;
 }

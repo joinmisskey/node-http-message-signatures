@@ -1,3 +1,4 @@
+import { sign } from 'node:crypto';
 import { HeadersLike, RequestLike } from "@/types";
 import { RFC9421SignSource, processSingleRFC9421SignSource, signAsRFC9421ToRequestOrResponse } from "@/rfc9421/sign";
 import { ed25519, rsa4096 } from "test/keys";
@@ -87,10 +88,20 @@ describe('RFC9421', () => {
 		});
 	});
 
-	const sig1ExpectedSign = 'gGI1l9aRpu7oejIDYbTP9oskjnS5rZbWScELpUl2dU80Ct63PFVsAWxJSa102qo3ykUvLf/OgHnmX5qXkrDeG0DXh0DP9m6sD6KzW3sgqDMBzSGMy8sjallfqtZT8u/N0U97/Mkck0GaTUxXNVDjR2iPcIjaA3c04w1Wp4y7Ww8qffRifelX2AUbFut4Pil60GaU1EFs3mDQEBIoOp+T50KQEKnkQpktzU0DshBori2j4gVEQw2hIH/G+gfzTBdUT8o6tvU6FSqGRWJakCOSFImqRLJcCc7NsX1je7O6D3mO8Mtp3tZdVjIYKZn/A45dA9xB0LEnXMQUN/TTIy7VG3uGfKGNV8k6ivvqQwcOf9FPoPmmIo+ejd48/+yosRYB2YdvVzN0h3Y5LiPT58ZKpze4MKxr7LeEcyzkXBd4eo9RK3q6MDRdrSxNRXDLXUQ7GI41aiJY+ginc4ZKpYUPdmFNf2H7HY4NMSPQCt8c0XNYMohA4znKLH4YaqtAUOO2YqupwIHtAzXriG/yCs3l5NvXnS8hXnYd4BM68t/gdxtJy9N66gZilXzDqh6fM7ptLKYHzUpvOfH6uWud3qgJJWcY21iSFfsZ48STrNIoF4/lWYrG4vQAPrDvuq6qH3sOMUpkRzQuITUIa9DqEBebkZdKTGgN30147dV65z4Qwc0=';
 	const sig1ExpectedParams = '("@method" "@authority" "@path" "@query" "content-digest" "accept");keyid="x";alg="rsa-v1_5-sha256";created=1618884475';
-	const sig2ExpectedSign = 'YP6B1blDYA/Saf5jPUBZYd8LSg2zFCWgzRx8rtyUqSAnK4hRXcTNcwuNSuqiIwcubp1FXRY7toruSN23t+DkCg==';
 	const sig2ExpectedParams = '("@method" "@authority" "@path" "@query" "content-digest" "accept");keyid="y";alg="ed25519";created=1618884475';
+	// Independent RFC 9421 base: an absent query is represented by "?".
+	const expectedBase = (params: string) => [
+		'"@method": GET',
+		'"@authority": example.com',
+		'"@path": /foo/bar',
+		'"@query": ?',
+		'"content-digest": sha-256=base64',
+		'"accept": */*',
+		`"@signature-params": ${params}`,
+	].join('\n');
+	const sig1ExpectedSign = sign('sha256', Buffer.from(expectedBase(sig1ExpectedParams)), rsa4096.privateKey).toString('base64');
+	const sig2ExpectedSign = sign(null, Buffer.from(expectedBase(sig2ExpectedParams)), ed25519.privateKey).toString('base64');
 	const basicSources = {
 		sig1: {
 			key: {
@@ -295,5 +306,53 @@ describe('RFC9421', () => {
 				expect(logger).toHaveBeenCalledWith('verification simply failed, label: sig2');
 			});
 		});
+	});
+});
+
+describe('independent RFC 9421 coverage regressions', () => {
+	function independentlySigned(url: string, method: string, components: string, lines: string[]) {
+		const params = `(${components});keyid="test-key";alg="ed25519"`;
+		const base = [...lines, `"@signature-params": ${params}`].join('\n');
+		return {
+			url, method,
+			headers: {
+				host: 'example.com',
+				'signature-input': `sig=${params}`,
+				signature: `sig=:${sign(null, Buffer.from(base), ed25519.privateKey).toString('base64')}:`,
+			},
+		};
+	}
+
+	test('changing a covered request-target query invalidates the signature', async () => {
+		const request = independentlySigned('/resource?item=one', 'GET', '"@method" "@request-target"', ['"@method": GET', '"@request-target": /resource?item=one']);
+		const options = { requiredComponents: { rfc9421: ['@request-target'] } };
+		expect(await verifyParsedSignature(parseRequestSignature(request, options), ed25519.publicKey)).toBe(true);
+		request.url = '/resource?item=two';
+		expect(await verifyParsedSignature(parseRequestSignature(request, options), ed25519.publicKey)).toBe(false);
+	});
+
+	test('changing case of a covered custom method invalidates the signature', async () => {
+		const request = independentlySigned('/resource', 'custom', '"@method"', ['"@method": custom']);
+		expect(await verifyParsedSignature(parseRequestSignature(request), ed25519.publicKey)).toBe(true);
+		request.method = 'CUSTOM';
+		expect(await verifyParsedSignature(parseRequestSignature(request), ed25519.publicKey)).toBe(false);
+	});
+
+	test('encoded query values interoperate and appended duplicates are rejected', async () => {
+		const request = independentlySigned('/resource?item=a%20b%0Ac', 'GET', '"@query-param";name="item"', ['"@query-param";name="item": a%20b%0Ac']);
+		const options = { requiredComponents: { rfc9421: ['"@query-param";name="item"'] } };
+		expect(await verifyParsedSignature(parseRequestSignature(request, options), ed25519.publicKey)).toBe(true);
+		request.url += '&%69tem=another';
+		expect(() => parseRequestSignature(request, options)).toThrow('No valid signature');
+	});
+
+	test('response signing and verification work for unsigned requests', async () => {
+		const response = {
+			req: { method: 'GET', url: '/resource', headers: { host: 'example.com' } },
+			statusCode: 200,
+			headers: { date: new Date().toUTCString() },
+		};
+		await signAsRFC9421ToRequestOrResponse(response, { sig: { key: { keyId: 'test-key', privateKeyPem: ed25519.privateKey }, identifiers: ['@status', 'date'] } });
+		expect(await verifyParsedSignature(parseRFC9421RequestOrResponse(response), ed25519.publicKey)).toBe(true);
 	});
 });

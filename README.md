@@ -100,6 +100,33 @@ Draft signing and verification accept absolute URLs and origin-form request targ
 See [the usage (sign-and-post.ts)](./test/unit/readme-usage/sign-and-post.ts)
 
 
+## Signature compatibility corrections in 1.1.3
+
+RFC 9421 components now follow the standard rather than the earlier local
+roundtrip behavior: `@request-target` covers the entire request target without a
+method prefix, `@method` preserves case, an absent `@query` is `?`, and named
+query parameters use percent-encoded names/values (spaces are `%20`). Repeated
+named query parameters are rejected; cover `@query` if repeated parameters are
+needed. Previously generated nonconforming signatures over these components
+will no longer verify. There is no fallback to the old, incomplete coverage.
+
+For non-Fetch inputs, `url` represents the actual request-target form when signing
+`@request-target` (origin, absolute, authority or asterisk). Fetch Request exposes
+only an absolute URL, so its normal origin-form target is derived. If an
+application converts URL forms or crosses HTTP versions, prefer `@target-uri`
+or `@path` plus `@query` rather than assuming those request-target forms match.
+
+Present `Date` and `X-Date` fields are both checked for freshness and validity;
+a stale or invalid extra field is rejected even when the other field is current.
+A single raw header value is accepted, duplicates are rejected. Callers must
+still require appropriate signed freshness components and implement their own
+replay/nonce policy. Date presence alone does not authenticate freshness.
+
+Digest verification retains `failOnNoDigest: true` and `verifyAll: true` when
+other options are supplied. Opt out only with an explicit `false`. Signature
+verification and body-digest verification remain separate operations; require
+and authenticate the digest field used by the application.
+
 ## Verification key selection
 
 For RFC 9421 key maps, a matching signature label takes precedence over `keyid`.
