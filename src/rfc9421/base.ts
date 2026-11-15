@@ -16,6 +16,7 @@ export const requestTargetDerivedComponents = [
 	'@request-target',
 	'@path',
 	'@query',
+	'@query-param',
 ];
 // https://datatracker.ietf.org/doc/html/rfc9421#name-initial-contents-3
 export const responseTargetDerivedComponents = [
@@ -111,8 +112,10 @@ export class RFC9421SignatureBaseFactory<T extends IncomingRequest | OutgoingRes
 			throw new Error('Request method is empty');
 		}
 
-		if (!('signature-input' in this.requestHeaders)) throw new Error('Signature-Input header is not found in request');
-		this.requestSignatureInput = sh.parseDictionary(canonicalizeHeaderValue(this.requestHeaders['signature-input'])) as SFVSignatureInputDictionary;
+		if (this.isRequest() && !('signature-input' in this.requestHeaders)) throw new Error('Signature-Input header is not found in request');
+		this.requestSignatureInput = this.isRequest()
+			? sh.parseDictionary(canonicalizeHeaderValue(this.requestHeaders['signature-input'])) as SFVSignatureInputDictionary
+			: new Map();
 
 		if (this.isResponse()) {
 			if (!this.responseHeaders) throw new Error('responseHeaders is empty');
@@ -120,9 +123,9 @@ export class RFC9421SignatureBaseFactory<T extends IncomingRequest | OutgoingRes
 			this.responseSignatureInput = sh.parseDictionary(canonicalizeHeaderValue(this.responseHeaders['signature-input'])) as SFVSignatureInputDictionary;
 		}
 
-		this.sfvTypeDictionary = lcObjectKey(additionalSfvTypeDictionary);
-
-		this.scheme = this.request.url.startsWith('/') ? scheme : new URL(this.request.url).protocol.replace(':', '');
+		const authorityForm = this.request.method === 'CONNECT' && !this.request.url.includes('://');
+		const localTarget = this.request.url.startsWith('/') || this.request.url === '*' || authorityForm;
+		this.scheme = localTarget ? scheme : new URL(this.request.url).protocol.replace(':', '');
 
 		// ブラウザではthis.request.urlが常にhttpで始まるのでrawHostは使わないはず
 		const rawHost = ('httpVersionMajor' in this.request && this.request.httpVersionMajor === 2) ?
@@ -130,7 +133,10 @@ export class RFC9421SignatureBaseFactory<T extends IncomingRequest | OutgoingRes
 			: this.requestHeaders['host'];
 		if (!isBrowserRequest(this.request) && !rawHost) throw new Error('Host header is empty');
 		const host = canonicalizeHeaderValue(rawHost);
-		this.targetUri = this.request.url.startsWith('/') ? (new URL(this.request.url, `${scheme}://${host}`)).href : this.request.url;
+		// Concatenation preserves an origin-form path beginning with // as a path.
+		this.targetUri = this.request.url.startsWith('/') ? new URL(`${scheme}://${host}${this.request.url}`).href
+			: this.request.url === '*' ? `${scheme}://${host}`
+				: authorityForm ? `${scheme}://${this.request.url}` : this.request.url;
 		this.url = new URL(this.targetUri);
 	}
 
@@ -183,7 +189,7 @@ export class RFC9421SignatureBaseFactory<T extends IncomingRequest | OutgoingRes
 			if (!this.request.method) {
 				throw new Error('Request method is empty');
 			}
-			return this.request.method.toUpperCase();
+			return this.request.method;
 		} else if (name === '@authority') {
 			return this.url.host;
 		} else if (name === '@scheme') {
@@ -191,24 +197,33 @@ export class RFC9421SignatureBaseFactory<T extends IncomingRequest | OutgoingRes
 		}	else if (name === '@target-uri') {
 			return this.targetUri;
 		} else if (name === '@request-target') {
+			if (!this.request.url) throw new Error('Request URL is empty');
 			if (!this.request.method) {
 				throw new Error('Request method is empty');
 			}
-			return `${this.request.method.toLowerCase()} ${this.url.pathname}`;
+			// Fetch exposes an absolute URL, not a raw HTTP request target.
+			if (isBrowserRequest(this.request)) {
+				const query = this.url.search || (this.url.href.split('#', 1)[0].endsWith('?') ? '?' : '');
+				return this.url.pathname + query;
+			}
+			return this.request.url.split('#', 1)[0];
 		} else if (name === '@path') {
 			return this.url.pathname;
 		} else if (name === '@query') {
-			return this.url.search;
+			return this.url.search || '?';
 		} else if (name === '@query-param') {
 			const key = params.get('name');
-			if (key === undefined) {
+			if (typeof key !== 'string') {
 				throw new Error('Query parameter name not found or invalid');
 			}
-			const value = this.url.searchParams.get(key.toString());
-			if (value === null) {
+			// RFC 9421 percent-encodes parsed names/values with spaceAsPlus=false.
+			const encode = (value: string) => new URLSearchParams([['', value]]).toString().slice(1).replaceAll('+', '%20');
+			const values = Array.from(this.url.searchParams).filter(([name]) => encode(name) === key).map(([, value]) => value);
+			if (values.length === 0) {
 				throw new Error(`Query parameter not found: ${key} (${componentIdentifier})`);
 			}
-			return value;
+			if (values.length !== 1) throw new Error(`Repeated query parameter: ${key} (${componentIdentifier})`);
+			return encode(values[0]);
 		} else if (name === '@status') {
 			if (!this.response) throw new Error('response is empty (@status)');
 			if (isBrowserResponse(this.response)) {
@@ -276,11 +291,8 @@ export class RFC9421SignatureBaseFactory<T extends IncomingRequest | OutgoingRes
 				if (!(name in this.sfvTypeDictionary)) {
 					throw new Error(`key specified but type unknown (Type not found in SFV type dictionary): ${componentIdentifier}`);
 				}
-				if (typeof rawValue !== 'string') {
-					throw new Error(`Key specified but value is not a string: ${componentIdentifier}`);
-				}
 				if (this.sfvTypeDictionary[name] === 'dict') {
-					const dictionary = sh.parseDictionary(rawValue);
+					const dictionary = sh.parseDictionary(canonicalizeHeaderValue(rawValue));
 					const value = dictionary.get(key);
 					if (value === undefined) {
 						throw new Error(`Key not found in dictionary: ${key} (${componentIdentifier})`);

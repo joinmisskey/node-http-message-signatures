@@ -193,7 +193,7 @@ export async function verifyRFC9530DigestHeader(
 	const headers = collectHeaders(request);
 	const contentDigestHeader = getHeaderValue(headers, 'content-digest');
 	if (!contentDigestHeader) {
-		if (opts.failOnNoDigest) {
+		if (opts.failOnNoDigest ?? true) {
 			if (errorLogger) errorLogger('Repr-Digest or Content-Digest header not found');
 			return false;
 		}
@@ -234,7 +234,7 @@ export async function verifyRFC9530DigestHeader(
 		if (errorLogger) errorLogger('No supported Content-Digest header algorithm');
 		return false;
 	}
-	if (!opts.verifyAll) {
+	if (!(opts.verifyAll ?? true)) {
 		acceptableAlgorithms = [acceptableAlgorithms.find(v => dictionaryAlgorithms.has(v))!];
 	}
 

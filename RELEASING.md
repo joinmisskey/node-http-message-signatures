@@ -65,22 +65,26 @@ Read registry state again immediately before deciding a version:
 npm view @misskey-dev/node-http-message-signatures versions dist-tags --json
 ```
 
-As of the 2026-10-05 release preflight, npm `latest` is publicly published
-`1.1.1`; `1.1.2` is absent from published versions. The user selected stable
-`1.1.2` and channel `latest` for the README implementation-marker correction at
-`a7a7d2d8f9b2074832a701452a275811ef718ffd`: independent signature/key-discovery
-dimensions, deprecated x1, and assertionMethod/Multikey x2. No production source or
-runtime dependency changes are included. The release commit updates the
-package version and these instructions; `dist/` stays untracked and is generated
-during build/pack. Tag `v1.1.2` must point to that release commit.
+As of the 2026-11-15 preflight, npm `latest` is publicly published `1.1.2`;
+`1.1.3` is absent from published versions, repository tags and release history.
+This patch targets stable `1.1.3` with channel `latest` for the signature review
+fixes. The source fixes and regression tests are followed by a separate reviewed
+release-version commit. Tag `v1.1.3` must point to the validated merged commit.
 
-Existing local npm access cannot list staged packages (`E401`). Repository tags,
-releases and staging-workflow history show no prior 1.1.2 attempt. Use the approved
-existing OIDC workflow once; its authenticated result is authoritative. If it
-reports an existing staged version, stop without replacing it or retrying staging.
-Do not change credentials to bypass the failed lookup. Read registry and staging
-history before any future release; never reuse an old artifact or assume that a
-GitHub tag determines the npm package version.
+This release corrects RFC 9421 request-target/query/method canonicalization,
+Structured Field handling and unsigned-request response signing, rejects stale
+or invalid Date/X-Date values, preserves digest defaults for partial options,
+and writes real Fetch headers for draft signatures. Existing nonconforming
+signatures over corrected components will no longer verify; see the compatibility
+notes in README.md. No dependency or workflow-permission changes are included.
+
+Local npm access is unauthenticated, so private staged reservations cannot be
+listed. The earlier 1.1.2 OIDC staging run succeeded, but that is not proof the
+trust configuration remains unchanged. Recheck public registry and workflow
+history immediately before attempting 1.1.3 staging. Use the existing OIDC flow
+once; if it reports a reserved or staged version, stop without overwriting,
+retrying staging, or changing credentials. Final npm approval remains an owner
+step and is not performed by this workflow.
 
 A maintainer must choose an unused version and explicitly approve the dist-tag
 (`latest` for a stable release or an agreed prerelease tag such as `beta`). npm
@@ -94,7 +98,7 @@ to inspect the intended payload without publishing. Keep the scope unchanged.
 The selected release method is npm OIDC **staged publishing**. The workflow
 `.github/workflows/npm-publish.yml` stages only; it never directly publishes,
 approves a staged package, or executes `npm dist-tag`. The selected package version is
-`1.1.2`, and the npm name remains `@misskey-dev/node-http-message-signatures`.
+`1.1.3`, and the npm name remains `@misskey-dev/node-http-message-signatures`.
 
 The owner registers the Trusted Publisher in npm package settings with:
 
@@ -121,10 +125,11 @@ use pnpm, while pack/dry-run/staging use npm.
 
 Before staging, check published versions and available Staged Packages/history;
 staged versions also reserve their version number. Follow the access-limited
-preflight and single-attempt rule above for this approved 1.1.2 release. The selected
-tag must reference the approved commit that includes this workflow and scripts.
-The user has approved the 1.1.2 GitHub Release and npm staging. Owner approval
-of the staged npm package remains a separate final action.
+preflight and single-attempt rule above. The selected tag must reference the
+validated merged commit including the release-version commit, workflow and scripts.
+The current requested outcome is staging 1.1.3 for owner review after all fixes,
+independent review and CI pass. Owner approval of the staged npm package remains
+a separate final action.
 
 Choose exactly one trigger for the approved version:
 
@@ -133,10 +138,10 @@ Choose exactly one trigger for the approved version:
   prerelease flag must match the package version.
 - Run the workflow manually from `main`, providing an existing reviewed
   `release_tag`, `dist_tag`, and `confirm_stage=true`. For example, after an
-  approved `v1.1.2` tag exists:
+  approved `v1.1.3` tag exists:
 
   ```sh
-  gh workflow run npm-publish.yml --repo joinmisskey/node-http-message-signatures --ref main -f release_tag=v1.1.2 -f dist_tag=latest -f confirm_stage=true
+  gh workflow run npm-publish.yml --repo joinmisskey/node-http-message-signatures --ref main -f release_tag=v1.1.3 -f dist_tag=latest -f confirm_stage=true
   ```
 
 Tags must be exactly the package version, with an optional `v` prefix. The job
@@ -150,8 +155,8 @@ supported. Release events derive the same channel from the version.
 The job runs the guard tests, frozen dependency install, lint, build, and unit
 tests. It packs one tarball, checks its expected filename, and runs
 `npm stage publish --dry-run` on it before staging **the same tarball**. For
-`1.1.2` the artifact is
-`misskey-dev-node-http-message-signatures-1.1.2.tgz`. Staging does not make that
+`1.1.3` the artifact is
+`misskey-dev-node-http-message-signatures-1.1.3.tgz`. Staging does not make that
 version publicly installable. Pushes and PR merges never trigger staging.
 
 ## Owner review and final publication

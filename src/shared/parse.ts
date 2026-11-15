@@ -90,6 +90,7 @@ export function signatureHeaderIsDraft(signatureHeader: string) {
 export function checkClockSkew(reqDate: Date, nowDate: Date, delay: number = 300 * 1e3, forward: number = 2000) {
 	const reqTime = reqDate.getTime();
 	const nowTime = nowDate.getTime();
+	if (!Number.isFinite(reqTime) || !Number.isFinite(nowTime)) throw new ClockSkewInvalidError(reqDate, nowDate);
 	if (reqTime > nowTime + forward) throw new ClockSkewInvalidError(reqDate, nowDate);
 	if (reqTime < nowTime - delay) throw new ClockSkewInvalidError(reqDate, nowDate);
 }
@@ -103,11 +104,14 @@ export function validateRequestAndGetSignatureHeader(
 ) {
 	const headers = collectHeaders(source);
 
-	if (headers['date']) {
-		checkClockSkew(new Date(canonicalizeHeaderValue(headers['date'])), clock?.now || new Date(), clock?.delay, clock?.forward);
-	} else if (headers['x-date']) {
-		if (Array.isArray(headers['x-date'])) throw new RequestHasMultipleDateHeadersError();
-		checkClockSkew(new Date(canonicalizeHeaderValue(headers['date'])), clock?.now || new Date(), clock?.delay, clock?.forward);
+	// Validate both accepted date fields. A fresh unsigned Date must never hide a
+	// stale signed X-Date (or vice versa). Callers must still require signed
+	// freshness components; merely having a date header does not authenticate it.
+	for (const name of ['date', 'x-date']) {
+		if (!Object.prototype.hasOwnProperty.call(headers, name)) continue;
+		const value = headers[name];
+		if (Array.isArray(value) && value.length !== 1) throw new RequestHasMultipleDateHeadersError();
+		checkClockSkew(new Date(canonicalizeHeaderValue(value)), clock?.now ?? new Date(), clock?.delay, clock?.forward);
 	}
 
 	const request = 'req' in source ? source.req : source;

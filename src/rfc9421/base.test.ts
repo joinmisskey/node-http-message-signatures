@@ -170,9 +170,9 @@ describe(RFC9421SignatureBaseFactory, () => {
 				expect(factory.get('@authority')).toBe('example.com');
 				expect(factory.get('@scheme')).toBe('https');
 				expect(factory.get('@target-uri')).toBe('https://example.com/resource/1');
-				expect(factory.get('@request-target')).toBe('get /resource/1');
+				expect(factory.get('@request-target')).toBe('https://example.com/resource/1');
 				expect(factory.get('@path')).toBe('/resource/1');
-				expect(factory.get('@query')).toBe('');
+				expect(factory.get('@query')).toBe('?');
 				expect(() => factory.get('@query-param')).toThrow();
 			});
 			test('derived with query', () => {
@@ -389,5 +389,100 @@ describe(RFC9421SignatureBaseFactory, () => {
 				`"@signature-params": ("date" "@authority";req);keyid="https://example.com/users/:id#main-key";algo="rsa-pss-sha512"`
 			);
 		});
+	});
+});
+
+describe('RFC 9421 component regressions', () => {
+	const factoryFor = (url: string, method = 'GET') => new RFC9421SignatureBaseFactory({
+		method, url, headers: { host: 'example.com', 'signature-input': 'sig=("@method")' },
+	});
+
+	test.each([
+		['/path?param=value', 'POST', '/path?param=value'],
+		['https://example.com/path?param=value', 'GET', 'https://example.com/path?param=value'],
+		['example.com:80', 'CONNECT', 'example.com:80'],
+		['*', 'OPTIONS', '*'],
+		['/path?', 'GET', '/path?'],
+		['//path?param=%2F#fragment', 'GET', '//path?param=%2F'],
+	])('request-target preserves the RFC target form: %s', (url, method, expected) => {
+		expect(factoryFor(url, method).get('@request-target')).toBe(expected);
+	});
+
+	test('Fetch requests derive an origin-form target with empty query preserved', () => {
+		const request = new Request('https://example.com/path?', { headers: { 'signature-input': 'sig=("@method")' } });
+		expect(new RFC9421SignatureBaseFactory(request).get('@request-target')).toBe('/path?');
+	});
+
+	test('a leading double slash is not a replacement authority', () => {
+		const factory = factoryFor('//other.example/path');
+		expect(factory.get('@authority')).toBe('example.com');
+		expect(factory.get('@target-uri')).toBe('https://example.com//other.example/path');
+	});
+
+	test('method case is significant and absent queries use a question mark', () => {
+		expect(factoryFor('/path', 'custom').get('@method')).toBe('custom');
+		expect(factoryFor('/path').get('@query')).toBe('?');
+		expect(factoryFor('/path?').get('@query')).toBe('?');
+		expect(factoryFor('/path?foo=%2f').get('@query')).toBe('?foo=%2f');
+	});
+
+	test('query parameters use encoded names and values', () => {
+		const factory = factoryFor('/path?var=this%20is%20a%20big%0Amultiline%20value&bar=with+plus+whitespace&fa%C3%A7ade%22%3A%20=something&plus=%2B&empty=');
+		expect(factory.get('@query-param', { name: 'var' })).toBe('this%20is%20a%20big%0Amultiline%20value');
+		expect(factory.get('@query-param', { name: 'bar' })).toBe('with%20plus%20whitespace');
+		expect(factory.get('@query-param', { name: 'fa%C3%A7ade%22%3A%20' })).toBe('something');
+		expect(factory.get('@query-param', { name: 'plus' })).toBe('%2B');
+		expect(factory.get('@query-param', { name: 'empty' })).toBe('');
+		expect(() => factory.get('@query-param', { name: 'missing' })).toThrow('Query parameter not found');
+		expect(() => factory.get('@query-param', { name: true } as any)).toThrow('name not found or invalid');
+	});
+
+	test('matches the exact RFC 9421 section 2.2.8 multiline and encoded-name example', () => {
+		const params = '("@query-param";name="var" "@query-param";name="bar" "@query-param";name="fa%C3%A7ade%22%3A%20")';
+		const factory = new RFC9421SignatureBaseFactory({
+			method: 'GET',
+			url: '/parameters?var=this%20is%20a%20big%0Amultiline%20value&bar=with+plus+whitespace&fa%C3%A7ade%22%3A%20=something',
+			headers: { host: 'www.example.com', 'signature-input': `sig=${params}` },
+		});
+		expect(factory.generate('sig')).toBe([
+			'"@query-param";name="var": this%20is%20a%20big%0Amultiline%20value',
+			'"@query-param";name="bar": with%20plus%20whitespace',
+			'"@query-param";name="fa%C3%A7ade%22%3A%20": something',
+			`"@signature-params": ${params}`,
+		].join('\n'));
+	});
+
+	test.each(['/path?item=one&item=two', '/path?item=one&%69tem=two'])('repeated decoded query names are rejected: %s', url => {
+		expect(() => factoryFor(url).get('@query-param', { name: 'item' })).toThrow('Repeated query parameter');
+	});
+
+	test('built-in and custom Structured Field types coexist', () => {
+		const source = { ...requestBase, headers: { ...requestBase.headers, 'content-digest': 'sha-256=:AA==:', 'x-dict': 'a=1' } };
+		const factory = new RFC9421SignatureBaseFactory(source, undefined, { 'x-dict': 'dict' });
+		expect(factory.get('content-digest', { sf: true })).toBe('sha-256=:AA==:');
+		expect(factory.get('content-digest', { key: 'sha-256' })).toBe(':AA==:');
+		expect(factory.get('x-dict', { key: 'a' })).toBe('1');
+	});
+
+	test('dictionary members combine Node rawHeaders and native Fetch Headers', () => {
+		const source = { ...requestBase, rawHeaders: ['Host', 'example.com', 'Signature-Input', 'sig=("@method")', 'Content-Digest', 'sha-256=:AA==:', 'Content-Digest', 'sha-512=:AQ==:'] };
+		const factory = new RFC9421SignatureBaseFactory(source);
+		expect(factory.get('content-digest', { key: 'sha-256' })).toBe(':AA==:');
+		expect(factory.get('content-digest', { key: 'sha-512' })).toBe(':AQ==:');
+		const request = new Request('https://example.com/', { headers: { 'signature-input': 'sig=("@method")', 'content-digest': 'sha-256=:AA==:' } });
+		expect(new RFC9421SignatureBaseFactory(request).get('content-digest', { key: 'sha-256' })).toBe(':AA==:');
+	});
+
+	test('response bases do not require a signed initiating request', () => {
+		const req = { method: 'GET', url: '/path', headers: { host: 'example.com' } };
+		const response = { req, statusCode: 200, headers: { 'signature-input': 'sig=("@status" "@method";req)' } };
+		expect(new RFC9421SignatureBaseFactory(response).generate('sig')).toBe('"@status": 200\n"@method";req: GET\n"@signature-params": ("@status" "@method";req)');
+		const invalidRequestSignature = { ...response, req: { ...req, headers: { ...req.headers, 'signature-input': 'not a dictionary' } } };
+		expect(new RFC9421SignatureBaseFactory(invalidRequestSignature).generate('sig')).toBe(new RFC9421SignatureBaseFactory(response).generate('sig'));
+	});
+
+	test('query-param on responses requires the request context marker', () => {
+		const response = { req: { method: 'GET', url: '/?x=1', headers: { host: 'example.com' } }, statusCode: 200, headers: { 'signature-input': 'sig=("@status")' } };
+		expect(() => new RFC9421SignatureBaseFactory(response).get('@query-param', { name: 'x' })).toThrow('must use with ;req');
 	});
 });
